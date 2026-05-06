@@ -22,6 +22,9 @@ Example:
 """
 
 from n2v.probabilistic.verify import verify
+from n2v.probabilistic.verify_flow import (
+    run_verification_pipeline as verify_flow,
+)
 from n2v.sets.probabilistic_box import ProbabilisticBox
 from n2v.probabilistic.conformal import (
     ConformalGuarantee,
@@ -35,6 +38,7 @@ from n2v.probabilistic.conformal import (
 
 __all__ = [
     'verify',
+    'verify_flow',
     'ProbabilisticBox',
     'ConformalGuarantee',
     'compute_confidence',

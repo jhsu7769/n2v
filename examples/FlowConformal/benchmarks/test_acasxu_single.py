@@ -161,11 +161,15 @@ def main():
     print(f'Instance:      ACAS Xu N_{args.network}  prop_{args.property}')
     print(f'Verdict:       {result["verdict"]}')
     print(f'spec:          {result["spec_summary"]}')
-    print(f'coverage:      {result["coverage_empirical"]:.4f} (target >= {1 - args.alpha:.4f})')
-    print(f'eps_total:     {result["epsilon_total"]:.4f}')
-    print(f'delta_total:   {result["delta_total"]:.4f}  '
-          f'(eps1={result["epsilon_1"]:.4f} d1={result["delta_1"]:.4f}, '
-          f'eps2={result["epsilon_2"]:.4f} d2={result["delta_2"]:.4f})')
+
+    def _fmt(v, spec='.4f'):
+        return format(v, spec) if v is not None else 'n/a'
+
+    print(f'coverage:      {_fmt(result["coverage_empirical"])} (target >= {1 - args.alpha:.4f})')
+    print(f'eps_total:     {_fmt(result["epsilon_total"])}')
+    print(f'delta_total:   {_fmt(result["delta_total"])}  '
+          f'(eps1={_fmt(result["epsilon_1"])} d1={_fmt(result["delta_1"])}, '
+          f'eps2={_fmt(result["epsilon_2"])} d2={_fmt(result["delta_2"])})')
     print(f'train(s):      {result["flow_train_time_s"]:.1f}')
     print(f'verify(s):     {result["verification_time_s"]:.1f}')
     print(f'total(s):      {total:.1f}')

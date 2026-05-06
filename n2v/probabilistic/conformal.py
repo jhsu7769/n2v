@@ -7,6 +7,7 @@ This module implements the core conformal inference computations:
 - Guarantee computation
 """
 
+import warnings
 import numpy as np
 from scipy.stats import beta
 from typing import Tuple, Optional
@@ -110,6 +111,20 @@ def compute_normalization(
         max_abs_calib = np.max(np.abs(calibration_errors), axis=0)
         max_abs_errors = np.maximum(max_abs_train, max_abs_calib)
     else:
+        # Legacy training-only behavior. Per Hashemi 2025 (Paper 1 eq 6 /
+        # Paper 2 §3.2), τ_k must include calibration errors. Calling without
+        # `calibration_errors` is the buggy pre-fix behavior — for surrogates
+        # with zero training errors (e.g. clipping block), τ collapses to the
+        # τ* floor and the per-component inflation structure is erased.
+        warnings.warn(
+            "compute_normalization(training_errors) called without "
+            "`calibration_errors` — this is the legacy training-only "
+            "behavior and produces a buggy uniform τ for surrogates with "
+            "zero training errors (clipping block). Pass calibration_errors "
+            "to match Hashemi 2025 paper specification.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         max_abs_errors = max_abs_train
 
     tau = np.maximum(tau_star, max_abs_errors)

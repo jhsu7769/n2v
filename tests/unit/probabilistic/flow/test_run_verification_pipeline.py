@@ -77,19 +77,13 @@ def test_sat_on_tight_halfspace_with_real_preimage():
         n_train=2000, flow_epochs=500,
         flow_config='base',
         seed=0,
-        # The small training budget leaves the flow with a loose tail,
-        # so the worst flow sample may land slightly outside the true
-        # banana reach set. preimage_tolerance is interpreted in
-        # whitened output space (banana per-dim σ ≈ 0.3); 2.5 here is
-        # equivalent to ~0.75 in raw space, leaving comfortable slack
-        # for preimage matching. The "violates spec at real output"
-        # check inside scenario_verify_halfspace still enforces
-        # correctness (the reported x must give a real output in the
-        # unsafe region y_0 <= 0.5).
-        preimage_tolerance=2.5,
+        # The small training budget leaves the flow with a loose tail.
+        # SAT detection is delegated to the falsifier (random+pgd), which
+        # easily finds a real counterexample for y_0 <= 0.5 in the
+        # banana's reachable region.
     )
-    # Because preimage search is enabled (network passed in) and the
-    # banana really does reach y_0 > 0.5 in the input box, we expect SAT.
+    # Because the banana really does reach y_0 <= 0.5 in the input box
+    # and the falsifier is enabled, we expect SAT.
     assert result['verdict'] == 'SAT'
     assert result['counterexample'] is not None
     # counterexample should contain a real input (numpy array of shape (2,)).
@@ -103,3 +97,44 @@ def test_returns_spec_summary_string():
     # Fast test without training — mock the flow path by using a
     # trivially loose spec and minimal budget.
     pass  # implementation test; real coverage in the slow tests above
+
+
+@pytest.mark.slow
+def test_fast_sat_skips_flow_training():
+    """If the falsifier finds a counterexample, the pipeline should
+    return SAT WITHOUT training the flow. The flow-related fields in
+    the result should be None / 0.0, and total wall-clock should be
+    well under flow training time."""
+    from examples.FlowConformal.benchmarks._common import run_verification_pipeline
+    from examples.FlowConformal.networks import RotatedBananaNet
+    from n2v.sets.halfspace import HalfSpace
+    import time as _time
+
+    torch.manual_seed(0)
+    net = RotatedBananaNet().eval()
+    spec = HalfSpace(np.array([[1.0, 0.0]]), np.array([[0.5]]))   # easy SAT for banana
+    t0 = _time.time()
+    result = run_verification_pipeline(
+        network=net,
+        input_lb=np.array([0.0, 0.0]),
+        input_ub=np.array([1.0, 1.0]),
+        spec=spec,
+        alpha=0.01, m=500, ell=499,
+        scenario_n_samples=500, scenario_beta=0.001,
+        n_train=2000, flow_epochs=500,
+        flow_config='base', seed=0,
+    )
+    wall = _time.time() - t0
+
+    assert result['verdict'] == 'SAT'
+    assert result['counterexample'] is not None
+    # Flow fields must be None — training never ran
+    assert result['flow'] is None
+    assert result['q'] is None
+    assert result['coverage_empirical'] is None
+    assert result['y_mean'] is None
+    assert result['y_std'] is None
+    assert result['flow_train_time_s'] == 0.0
+    # Total time should be << flow-training time (the banana flow takes ~10-20s
+    # on these settings; falsifier finds the cex in <1s).
+    assert wall < 5.0

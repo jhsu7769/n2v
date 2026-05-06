@@ -35,9 +35,19 @@ def spec_summary(spec: SpecLike) -> str:
             f"HalfSpace dim={spec.dim}, "
             f"{n_rows} constraint{'s' if n_rows != 1 else ''}{suffix}"
         )
+    if isinstance(spec, dict) and 'Hg' in spec:
+        hg = spec['Hg']
+        if isinstance(hg, HalfSpace):
+            n_rows = hg.G.shape[0]
+            return f"AND group: HalfSpace dim={hg.dim}, {n_rows} constraint{'s' if n_rows != 1 else ''}"
+        if isinstance(hg, list):
+            return f"AND group: OR of {len(hg)} HalfSpaces"
     if isinstance(spec, list):
         if len(spec) == 0:
             return "empty spec"
+        # list of dicts (load_vnnlib output): each dict is a property group
+        if isinstance(spec[0], dict):
+            return f"AND of {len(spec)} property groups"
         return f"OR of {len(spec)} HalfSpace groups"
     raise TypeError(f"unsupported spec type: {type(spec).__name__}")
 
@@ -46,146 +56,165 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from n2v.probabilistic.flow.scenario_verify import scenario_verify_halfspace
+from n2v.probabilistic.flow.scenario_verify import (
+    certify_spec_disjoint,
+    scenario_verify_halfspace,
+)
+from n2v.utils.verify_specification import _parse_property_groups
+
+
+def certify_spec_on_flow(
+    flow_ode,
+    threshold_q: float,
+    spec,  # HalfSpace, list[HalfSpace], dict with 'Hg', list[dict]
+    *,
+    n_samples: int,
+    beta_2: float,
+    t: float = 1.0,
+    n_ode_steps: int = 30,
+    ode_method: str = 'rk4',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
+    seed: 'int | None' = None,
+    adaptive_threshold: 'float | None' = None,
+    adaptive_n_samples: 'int | None' = None,
+    sampling_strategy: str = 'uniform',
+) -> dict:
+    """UNSAT-certification for an arbitrary VNN-LIB-shaped spec on a
+    calibrated flow set.
+
+    Normalizes ``spec`` into canonical ``list[list[HalfSpace]]`` via
+    ``n2v.utils.verify_specification._parse_property_groups``, then
+    delegates to :func:`certify_spec_disjoint` (layer 3 of the scenario-
+    verify three-layer dispatcher). UNSAT-only: never returns SAT (SAT
+    detection lives in the falsifier lane — separate from this function).
+
+    Supported ``spec`` shapes (all normalized by ``_parse_property_groups``):
+      - Single HalfSpace (1 or k rows): single group, single member.
+      - list[HalfSpace]: single group with OR semantics.
+      - dict with 'Hg' key: single group from load_vnnlib output.
+      - list[dict]: AND across groups (each dict is one group).
+
+    Args:
+        flow_ode, threshold_q, n_samples, beta_2, t, n_ode_steps,
+        ode_method, ode_atol, ode_rtol, seed: passed to layer 3.
+        adaptive_threshold, adaptive_n_samples: forwarded to layer 3
+            (and ultimately layer 1). See
+            ``n2v.probabilistic.flow.scenario_verify.certify_halfspace_disjoint``
+            for semantics. Default None disables adaptive escalation.
+        sampling_strategy: forwarded to layer 3 (and ultimately layer 1).
+            ``'uniform'`` (default) keeps the original truncated-Gaussian-
+            on-the-ball latent sampler; ``'qmc'`` switches to Sobol-based
+            QMC sampling of N(0, I_d) for variance reduction. See
+            ``n2v.probabilistic.flow.scenario_verify.certify_halfspace_disjoint``
+            for semantics.
+
+            **Soundness note:** under ``'qmc'`` samples are drawn from
+            the full N(0, I_d), not truncated to the conformal level
+            set ``||z|| <= threshold_q``. The scenario bound is still
+            well-defined, but the joint composition with the conformal
+            layer ``epsilon_total = 1 - (1 - epsilon_1)(1 - epsilon_2)``
+            may not be tight (it was derived under the 'uniform'
+            truncated assumption). QMC is currently experimental for
+            variance-reduction ablations; do not rely on the joint
+            epsilon for sound certification under QMC.
+        spec: the input spec (any of the shapes above).
+
+    Returns:
+        dict with keys
+          unsat_certified (bool),
+          certifying_group_idx (int | None),
+          epsilon_2 (float) — Bonferroni bound over all HalfSpace tests,
+          delta_2 (float) — 1 - beta_2,
+          n_samples_used (int),
+          per_group_results (list[GroupDisjointResult]),
+          spec_summary (str) — human-readable one-liner for the input spec.
+    """
+    # Pre-parse to trigger early type errors from the spec (e.g. unknown
+    # structure), then pass the normalized groups to layer 3. If the
+    # caller has ALREADY pre-parsed (e.g. the pipeline, which whitens
+    # each HalfSpace before calling us), we still re-parse; the parser
+    # is idempotent on list[list[HalfSpace]] input:
+    if (isinstance(spec, list) and len(spec) > 0
+            and all(isinstance(g, list) for g in spec)):
+        groups = spec  # already canonical
+    else:
+        groups = _parse_property_groups(spec)
+
+    result = certify_spec_disjoint(
+        flow_ode=flow_ode, threshold_q=threshold_q, spec_groups=groups,
+        n_samples=n_samples, beta_2=beta_2,
+        t=t, n_ode_steps=n_ode_steps, ode_method=ode_method,
+        ode_atol=ode_atol, ode_rtol=ode_rtol, seed=seed,
+        adaptive_threshold=adaptive_threshold,
+        adaptive_n_samples=adaptive_n_samples,
+        sampling_strategy=sampling_strategy,
+    )
+    return {
+        'unsat_certified': result.unsat_certified,
+        'certifying_group_idx': result.certifying_group_idx,
+        'epsilon_2': result.epsilon_2,
+        'delta_2': 1.0 - beta_2,
+        'n_samples_used': result.n_samples_used,
+        'per_group_results': result.per_group_results,
+        'spec_summary': spec_summary(spec),
+    }
 
 
 def verify_spec_on_flow(
     flow_ode,
     threshold_q: float,
-    spec: SpecLike,
-    input_lb: np.ndarray,
-    input_ub: np.ndarray,
-    network: Optional[Callable],
-    alpha: float,
-    delta_1: float,
-    beta_2: float,
-    n_samples: int,
+    spec,
+    input_lb=None,
+    input_ub=None,
+    network=None,
+    alpha: 'float | None' = None,
+    delta_1: 'float | None' = None,
+    beta_2: float = 0.001,
+    n_samples: int = 10_000,
     t: float = 1.0,
     n_ode_steps: int = 30,
     preimage_n_restarts: int = 10,
     preimage_n_steps: int = 200,
     preimage_lr: float = 0.05,
-    preimage_tolerance: float = 1e-3,
-    output_shift: Optional[np.ndarray] = None,
+    preimage_tolerance: float = 0.1,
+    output_shift=None,
     ode_method: str = 'rk4',
 ) -> dict:
-    """Run scenario-based verification of ``spec`` on a calibrated flow.
+    """DEPRECATED: use :func:`certify_spec_on_flow` instead.
 
-    The spec dispatcher for Phase 2. Supports:
-      - ``HalfSpace`` (1 row)       — single halfspace ``w^T y <= b``.
-      - ``HalfSpace`` (k rows)      — AND of k halfspaces; loops over rows
-                                      and union-bounds the scenario
-                                      violation probability.
-    OR-of-ANDs (``list[HalfSpace]``) is deferred to Phase 3.
+    This shim accepts the old (Phase 2/3) parameter list and translates
+    the modern UNSAT-only result into the old ``{verdict, ...}`` shape
+    so legacy callers continue to work during the Phase 4 migration.
 
-    Args:
-        flow_ode: trained FlowODE.
-        threshold_q: calibrated conformal threshold (e.g., from
-            :func:`n2v.probabilistic.flow.calibrate.calibrate`).
-        spec: the spec to verify (VNN-LIB ``prop`` field shape).
-        input_lb, input_ub: input-box bounds (passed to preimage search).
-        network: target network for preimage search, or ``None`` to disable
-            (then only 'verified' / 'unknown' verdicts are possible).
-        alpha: conformal miscoverage level (reported as ``epsilon_1``).
-        delta_1: conformal confidence (from Hashemi double-step).
-        beta_2: scenario confidence-failure probability.
-        n_samples: scenario sample size.
-        t, n_ode_steps, preimage_*, output_shift: passed through to
-            ``scenario_verify_halfspace``.
-
-    Returns:
-        Dict with keys:
-          verdict: 'SAT' | 'UNSAT' | 'UNKNOWN'
-            SAT    = at least one constraint falsified + real preimage found.
-            UNSAT  = all constraints verified (joint probabilistic certificate).
-            UNKNOWN = at least one constraint falsified in flow set but no
-                     preimage found (hallucination) or preimage search was
-                     disabled.
-          epsilon_2: effective scenario bound after union-bound over K rows.
-          delta_2: ``1 - beta_2``.
-          n_samples_used: ``n_samples``.
-          counterexample: (z, y, margin) of the worst-violating halfspace,
-                         or None if verified.
-          per_constraint_results: list of ScenarioResult, one per row.
-
-    Raises:
-        NotImplementedError: if ``spec`` is a list (OR-of-ANDs).
-        TypeError: if ``spec`` has an unsupported type.
+    Under the new two-lane architecture, this function ONLY returns
+    UNSAT or UNKNOWN (never SAT). SAT detection is the falsifier lane's
+    job.
     """
-    if isinstance(spec, list):
-        raise NotImplementedError(
-            "OR-of-ANDs spec structures are deferred to Phase 3; "
-            f"got a list of {len(spec)} HalfSpace groups."
-        )
-    if not isinstance(spec, HalfSpace):
-        raise TypeError(
-            f"unsupported spec type: {type(spec).__name__} "
-            "(expected HalfSpace or list[HalfSpace])"
-        )
-
-    G = spec.G  # (k, d)
-    g = spec.g.flatten()  # (k,)
-    k_rows = G.shape[0]
-
-    per_row_results = []
-    worst_outcome = 'verified'
-    worst_counterexample = None
-
-    for i in range(k_rows):
-        # scenario_verify_halfspace treats its (w, b) as a SAFETY constraint
-        # w^T y <= b and flags "violation" when w^T y > b. VNN-LIB encodes
-        # the UNSAFE region as G y <= g; a point in that region is an SAT
-        # witness. Bridge the two by negating: pass w = -G[i], b = -g[i]
-        # so scenario_verify's "violation" (w y > b) corresponds to the
-        # VNN-LIB unsafe-hit (G y <= g).
-        w = -G[i]
-        b = -float(g[i])
-        result = scenario_verify_halfspace(
-            flow_ode=flow_ode,
-            threshold_q=threshold_q,
-            w=w, b=b,
-            n_samples=n_samples,
-            beta_2=beta_2,
-            t=t,
-            n_ode_steps=n_ode_steps,
-            target_fn=network,
-            input_set_bounds=(
-                (input_lb, input_ub) if network is not None else None
-            ),
-            preimage_n_restarts=preimage_n_restarts,
-            preimage_n_steps=preimage_n_steps,
-            preimage_lr=preimage_lr,
-            preimage_tolerance=preimage_tolerance,
-            output_shift=output_shift,
-            ode_method=ode_method,
-        )
-        per_row_results.append(result)
-
-        # AND semantics: the spec is falsified as soon as any row is falsified.
-        # Track the "worst" outcome for the unified verdict, with severity
-        # ordering falsified > unknown > verified.
-        severity = {'verified': 0, 'unknown': 1, 'falsified': 2}
-        if severity[result.outcome] > severity[worst_outcome]:
-            worst_outcome = result.outcome
-            worst_counterexample = result.counterexample
-
-    # Union bound on epsilon_2 across the k rows (conservative; tighter
-    # shared-samples bounds are a Phase 3 improvement if needed).
-    import math as _math
-    epsilon_2_single = -_math.log(beta_2) / n_samples
-    epsilon_2_union = min(1.0, k_rows * epsilon_2_single)
-
-    verdict = {
-        'verified': 'UNSAT',
-        'unknown': 'UNKNOWN',
-        'falsified': 'SAT',
-    }[worst_outcome]
-
+    import warnings
+    warnings.warn(
+        "verify_spec_on_flow is deprecated; use certify_spec_on_flow. "
+        "The new function handles AND-of-OR-of-AND specs natively and "
+        "returns UNSAT-only results (SAT detection is handled by the "
+        "falsifier lane).",
+        DeprecationWarning, stacklevel=2,
+    )
+    # Drop kwargs the new API doesn't accept:
+    _ = (input_lb, input_ub, network, alpha, delta_1,
+         preimage_n_restarts, preimage_n_steps, preimage_lr,
+         preimage_tolerance, output_shift)
+    res = certify_spec_on_flow(
+        flow_ode=flow_ode, threshold_q=threshold_q, spec=spec,
+        n_samples=n_samples, beta_2=beta_2,
+        t=t, n_ode_steps=n_ode_steps, ode_method=ode_method,
+        seed=None,
+    )
+    verdict = 'UNSAT' if res['unsat_certified'] else 'UNKNOWN'
     return {
         'verdict': verdict,
-        'epsilon_2': epsilon_2_union,
-        'delta_2': 1.0 - beta_2,
-        'n_samples_used': n_samples,
-        'counterexample': worst_counterexample,
-        'per_constraint_results': per_row_results,
+        'epsilon_2': res['epsilon_2'],
+        'delta_2': res['delta_2'],
+        'n_samples_used': res['n_samples_used'],
+        'counterexample': None,
+        'per_constraint_results': [],
     }

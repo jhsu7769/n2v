@@ -175,3 +175,44 @@ class TestFlowScore:
 
         assert score_at_1 == pytest.approx(5.0)
         assert score_at_05 == pytest.approx(2.5)
+
+
+class TestGMMScore:
+    """Tests for GMMScore."""
+
+    def test_output_shape(self):
+        """Score returns (batch,) tensor matching input dtype."""
+        from n2v.probabilistic.flow.scores import GMMScore
+        rng = np.random.default_rng(0)
+        y_train = torch.as_tensor(
+            rng.normal(size=(200, 3)).astype(np.float32)
+        )
+        score_fn = GMMScore.fit(y_train, n_components=3, random_state=0)
+        y_test = torch.as_tensor(rng.normal(size=(10, 3)).astype(np.float32))
+        s = score_fn(y_test)
+        assert s.shape == (10,)
+        assert s.dtype == torch.float32
+
+    def test_high_density_at_training_points(self):
+        """Training points should score lower (higher density) than far points."""
+        from n2v.probabilistic.flow.scores import GMMScore
+        rng = np.random.default_rng(1)
+        # Tight cluster around origin
+        y_train = torch.as_tensor(
+            (0.1 * rng.normal(size=(500, 2))).astype(np.float32)
+        )
+        score_fn = GMMScore.fit(y_train, n_components=2, random_state=1)
+        # Score near origin (in distribution) vs far (out of distribution)
+        near = torch.zeros((1, 2), dtype=torch.float32)
+        far = torch.tensor([[10.0, 10.0]], dtype=torch.float32)
+        assert score_fn(near).item() < score_fn(far).item()
+
+    def test_accepts_numpy_array(self):
+        """fit and __call__ accept numpy arrays (not just tensors)."""
+        from n2v.probabilistic.flow.scores import GMMScore
+        rng = np.random.default_rng(2)
+        y_train = rng.normal(size=(150, 2)).astype(np.float32)
+        score_fn = GMMScore.fit(y_train, n_components=2, random_state=2)
+        y_test = rng.normal(size=(5, 2)).astype(np.float32)
+        s = score_fn(y_test)
+        assert s.shape == (5,)

@@ -32,6 +32,59 @@ from scipy.stats import chi
 _REJECTION_DIM_THRESHOLD = 30
 
 
+def _qmc_sample_latents(
+    n_samples: int,
+    dim: int,
+    *,
+    seed: 'int | None',
+    device='cpu',
+    dtype=torch.float32,
+    antithetic: bool = False,
+) -> torch.Tensor:
+    """Sobol-based QMC sample of N(0, I_d).
+
+    Uses ``scipy.stats.qmc.Sobol`` for low-discrepancy points in
+    ``[0, 1]^d``, then inverse-Gaussian-CDF (``norm.ppf``) to map to the
+    standard normal. Returns a tensor of shape ``(n_samples, dim)`` on
+    ``device`` with ``dtype``.
+
+    Equidistributed on N(0, I), so the scenario optimization estimator
+    remains unbiased; variance is reduced by 2-4x typical compared to
+    i.i.d. Gaussian sampling for smooth integrands.
+
+    Args:
+        n_samples: number of latent samples to draw.
+        dim: dimensionality of each sample.
+        seed: optional seed for the Sobol scrambler. ``None`` is allowed
+            (scipy treats it as system entropy).
+        device: torch device for the returned tensor.
+        dtype: torch dtype for the returned tensor.
+        antithetic: when True, draw ``ceil(n_samples / 2)`` Sobol points
+            and pair each ``z`` with ``-z`` to fill ``n_samples`` total.
+            For odd ``n_samples`` the final unpaired Sobol point is
+            included as-is. Each sample is marginally N(0, I_d) (the
+            standard Gaussian is symmetric), so the scenario bound still
+            applies.
+
+    Returns:
+        ``(n_samples, dim)`` torch tensor of standard normal QMC samples.
+    """
+    from scipy.stats import qmc, norm
+    if antithetic:
+        n_base = (n_samples + 1) // 2  # ceil(n_samples / 2)
+    else:
+        n_base = n_samples
+    sampler = qmc.Sobol(d=dim, scramble=True, seed=seed)
+    u = sampler.random(n_base)  # numpy (n_base, d) in [0, 1]^d
+    # Avoid 0 and 1 (norm.ppf would give -inf / +inf); clip to (eps, 1-eps).
+    u = u.clip(1e-10, 1 - 1e-10)
+    z = norm.ppf(u)  # numpy, standard normal
+    if antithetic:
+        z_pair = np.concatenate([z, -z], axis=0)  # (2 * n_base, d)
+        z = z_pair[:n_samples]  # trim to exactly n_samples
+    return torch.from_numpy(z).to(device=device, dtype=dtype)
+
+
 @dataclass
 class ScenarioResult:
     """
@@ -60,6 +113,83 @@ class ScenarioResult:
     genuine_input: Optional[np.ndarray]
     epsilon_2: float
     delta_2: float
+    n_samples_used: int
+
+
+@dataclass
+class HalfSpaceDisjointResult:
+    """Result of certify_halfspace_disjoint (joint-target scenario verify).
+
+    disjoint: True iff no flow sample was found inside the HalfSpace's polyhedron.
+    worst_sample: (d,) ndarray — flow sample with minimum max-row-margin
+                  (most likely to be inside the polyhedron; useful for diagnostics).
+    worst_max_margin: float — min over samples of max over rows of (G[i]@y - g[i]).
+                     Positive iff disjoint.
+    epsilon_2: scenario bound log(1/beta_2) / n_samples.
+    n_samples_used: echo of n_samples.
+    """
+    disjoint: bool
+    worst_sample: np.ndarray
+    worst_max_margin: float
+    epsilon_2: float
+    n_samples_used: int
+
+
+@dataclass
+class GroupDisjointResult:
+    """Result of certify_group_disjoint (layer 2 of the scenario-verify
+    three-layer dispatcher).
+
+    A 'group' is a list of HalfSpaces with OR semantics — the group is
+    hit iff AT LEAST ONE HalfSpace is hit. Therefore the group is
+    DISJOINT from the flow set iff EVERY HalfSpace in it is disjoint.
+
+    Fields:
+        disjoint: True iff every HalfSpace in the group was individually
+            certified disjoint.
+        per_hs_results: list of HalfSpaceDisjointResult, one per
+            HalfSpace in the group, in the same order as the input.
+        epsilon_2: Bonferroni bound over the group members —
+            |group| * log(1/beta_2) / n_samples.
+        n_samples_used: echo of n_samples.
+    """
+    disjoint: bool
+    per_hs_results: list
+    epsilon_2: float
+    n_samples_used: int
+
+
+@dataclass
+class SpecDisjointResult:
+    """Result of certify_spec_disjoint (layer 3 of the scenario-verify
+    three-layer dispatcher).
+
+    A 'spec' is a list of groups with AND semantics across groups and
+    OR semantics within each group (AND-of-OR-of-AND, matching n2v's
+    canonical `_parse_property_groups` shape).
+
+    UNSAT is certified iff AT LEAST ONE group is disjoint from the flow
+    set, because the AND across groups requires every group to be hit.
+    One group guaranteed-not-hit breaks the AND and implies UNSAT.
+
+    Fields:
+        unsat_certified: True iff at least one group was certified
+            disjoint (layer 2 returned disjoint=True for some group).
+        certifying_group_idx: index of the group that certified disjoint
+            (None if no group did).
+        per_group_results: list of GroupDisjointResult, one per group
+            processed before early-exit. May be shorter than len(spec_groups)
+            when a disjoint group is found early.
+        epsilon_2: Bonferroni bound over ALL HalfSpace tests planned
+            across all groups — sum over groups of |group| times
+            log(1/beta_2)/n_samples. Conservative: uses the full planned
+            count, not the count actually executed.
+        n_samples_used: echo of n_samples.
+    """
+    unsat_certified: bool
+    certifying_group_idx: 'int | None'
+    per_group_results: list
+    epsilon_2: float
     n_samples_used: int
 
 
@@ -408,17 +538,35 @@ def scenario_verify_halfspace(
         float(margins[worst_idx]),
     )
 
-    # Optional preimage search
+    # Optional preimage search. Some ONNX-imported networks (yolo's
+    # batch_loop_unbatched wrapper, Cohen RS-wrapped CIFAR-10 ResNet-110)
+    # don't propagate gradients through their forward pass — calling
+    # ``loss.backward()`` inside ``preimage_search`` then raises
+    # ``RuntimeError: element 0 of tensors does not require grad ...``.
+    # That's a bug in the loader, not a real failure of the verification
+    # pipeline: we already have a probabilistic SAT witness in ``ce``.
+    # Treat the preimage step as best-effort metadata and fall through
+    # to the ``unknown`` outcome on failure rather than crashing.
+    preimage = None
     if target_fn is not None and input_set_bounds is not None:
-        preimage = preimage_search(
-            target_fn=target_fn,
-            y_target=ce[1],
-            input_set_bounds=input_set_bounds,
-            n_restarts=preimage_n_restarts,
-            n_steps=preimage_n_steps,
-            lr=preimage_lr,
-            tolerance=preimage_tolerance,
-        )
+        try:
+            preimage = preimage_search(
+                target_fn=target_fn,
+                y_target=ce[1],
+                input_set_bounds=input_set_bounds,
+                n_restarts=preimage_n_restarts,
+                n_steps=preimage_n_steps,
+                lr=preimage_lr,
+                tolerance=preimage_tolerance,
+            )
+        except RuntimeError as e:
+            # Most common: gradient-flow failure in non-differentiable
+            # wrappers. Other RuntimeErrors are also non-fatal here.
+            if 'does not require grad' not in str(e):
+                # Re-raise unrelated RuntimeErrors so they're still loud.
+                raise
+            preimage = None
+    if preimage is not None:
         if preimage.found:
             # Explicitly verify the spec is violated at the real output.
             # preimage.y_achieved is f(preimage.x) from the final step.
@@ -669,19 +817,27 @@ def verify_robustness(
         worst_class,
     )
 
-    # Optional preimage search
+    # Optional preimage search. Same gradient-flow caveat as in the
+    # halfspace path above (see comment block there).
     genuine_input = None
     outcome = 'unknown'
+    preimage = None
     if target_fn is not None and input_set_bounds is not None:
-        preimage = preimage_search(
-            target_fn=target_fn,
-            y_target=counterexample[1],
-            input_set_bounds=input_set_bounds,
-            n_restarts=preimage_n_restarts,
-            n_steps=preimage_n_steps,
-            lr=preimage_lr,
-            tolerance=preimage_tolerance,
-        )
+        try:
+            preimage = preimage_search(
+                target_fn=target_fn,
+                y_target=counterexample[1],
+                input_set_bounds=input_set_bounds,
+                n_restarts=preimage_n_restarts,
+                n_steps=preimage_n_steps,
+                lr=preimage_lr,
+                tolerance=preimage_tolerance,
+            )
+        except RuntimeError as e:
+            if 'does not require grad' not in str(e):
+                raise
+            preimage = None
+    if preimage is not None:
         if preimage.found:
             # Explicitly verify the spec is violated at the real output.
             # The robustness spec is violated if any wrong class beats
@@ -811,4 +967,339 @@ def preimage_search(
         x=best_x if best_distance < tolerance else None,
         y_achieved=best_y if best_distance < tolerance else None,
         distance=best_distance,
+    )
+
+
+def certify_halfspace_disjoint(
+    flow_ode,
+    threshold_q: float,
+    halfspace: 'HalfSpace',
+    *,
+    n_samples: int,
+    beta_2: float,
+    t: float = 1.0,
+    n_ode_steps: int = 30,
+    ode_method: str = 'rk4',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
+    seed: 'int | None' = None,
+    adaptive_threshold: 'float | None' = None,
+    adaptive_n_samples: 'int | None' = None,
+    sampling_strategy: str = 'uniform',
+) -> HalfSpaceDisjointResult:
+    """Joint-target scenario-verify for a single (possibly multi-row) HalfSpace.
+
+    Certifies that no flow sample lands in the polyhedron defined by
+    ``G y <= g`` (all rows simultaneously). Operates in whatever coordinate
+    frame the flow was trained in — pass a pre-whitened HalfSpace if the
+    flow was trained on pre-whitened outputs.
+
+    Args:
+        flow_ode: trained FlowODE.
+        threshold_q: calibrated conformal threshold.
+        halfspace: HalfSpace with G shape (k, d), g shape (k, 1) or (k,).
+        n_samples: scenario sample count N.
+        beta_2: scenario confidence-failure probability.
+        t, n_ode_steps, ode_method, ode_atol, ode_rtol: flow integration kwargs.
+        seed: optional seed for reproducibility. Sets np.random.seed
+            before scenario sampling; does not affect torch global state
+            beyond what flow integration implicitly uses.
+        adaptive_threshold: if not None and the first-stage worst-sample's
+            max-row-margin is in (0, adaptive_threshold] (a marginal
+            certification), re-run with adaptive_n_samples samples and
+            return that result instead. The first-stage run is treated
+            as a heuristic gate; the second-stage run is the actual
+            hypothesis test, so epsilon_2 = log(1/beta_2)/adaptive_n_samples.
+            Default None disables adaptive escalation.
+        adaptive_n_samples: the larger N to use on the re-run. Must be
+            specified together with adaptive_threshold.
+        sampling_strategy: ``'uniform'`` (default) draws latent samples
+            from the truncated Gaussian on the ball ``||z|| <= threshold_q``
+            via :func:`sample_truncated_gaussian_ball`. ``'qmc'`` instead
+            draws Sobol-based quasi-Monte-Carlo samples from N(0, I_d)
+            (untruncated) via :func:`_qmc_sample_latents`. QMC reduces
+            estimator variance for smooth integrands; the scenario bound
+            still applies because Sobol+norm.ppf samples are
+            equidistributed on N(0, I).
+
+            **Soundness note:** when ``sampling_strategy='qmc'``, samples
+            are drawn from the full N(0, I_d) (not truncated to the
+            conformal level set ``||z|| <= threshold_q``). The scenario
+            bound is still well-defined under this sampling distribution,
+            but the joint composition with the conformal layer
+            ``epsilon_total = 1 - (1 - epsilon_1)(1 - epsilon_2)`` was
+            derived under the 'uniform' (truncated) assumption and may
+            not be tight under QMC. QMC is currently experimental for
+            variance-reduction ablations; do not rely on the joint
+            epsilon for sound certification under QMC.
+
+    Returns:
+        HalfSpaceDisjointResult. ``disjoint=True`` iff every sample has
+        ``max_i (G[i] @ y - g[i]) > 0``. The polyhedron is treated as
+        CLOSED — a sample exactly on a face (max margin == 0) counts
+        as inside, hence not-disjoint.
+    """
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
+    if not (0.0 < beta_2 < 1.0):
+        raise ValueError(f"beta_2 must be in (0, 1), got {beta_2}")
+
+    G = np.asarray(halfspace.G, dtype=np.float64)
+    g = np.asarray(halfspace.g, dtype=np.float64).flatten()
+
+    # Seed np.random before sample_truncated_gaussian_ball (which uses
+    # the global numpy RNG).
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 1. Sample latent points. Strategy dispatch:
+    #    - 'uniform'        : truncated Gaussian on the ball ||z|| <= q.
+    #    - 'qmc'            : Sobol QMC on full N(0, I_d) (no ball truncation).
+    #    - 'qmc+antithetic' : Sobol QMC paired with -z (ceil(N/2) Sobol
+    #                         points, mirrored to N total). Each sample
+    #                         is marginally N(0, I_d).
+    if sampling_strategy == 'uniform':
+        z_samples_np = sample_truncated_gaussian_ball(
+            q=threshold_q, dim=G.shape[1], n_samples=n_samples,
+        )
+        z_samples = torch.tensor(z_samples_np, dtype=torch.float32)
+    elif sampling_strategy == 'qmc':
+        z_samples = _qmc_sample_latents(
+            n_samples=n_samples, dim=G.shape[1], seed=seed,
+            device='cpu', dtype=torch.float32,
+        )
+        z_samples_np = z_samples.numpy().astype(np.float64)
+    elif sampling_strategy == 'qmc+antithetic':
+        z_samples = _qmc_sample_latents(
+            n_samples=n_samples, dim=G.shape[1], seed=seed,
+            device='cpu', dtype=torch.float32, antithetic=True,
+        )
+        z_samples_np = z_samples.numpy().astype(np.float64)
+    else:
+        raise ValueError(
+            f"unsupported sampling_strategy: {sampling_strategy!r} "
+            f"(expected 'uniform', 'qmc', or 'qmc+antithetic')"
+        )
+
+    # 2. Push through flow inverse (vectorized single integration)
+    with torch.no_grad():
+        y_samples = flow_ode.inverse(
+            z_samples, t=t, n_steps=n_ode_steps,
+            method=ode_method, atol=ode_atol, rtol=ode_rtol,
+        )
+    y_samples_np = y_samples.numpy().astype(np.float64)  # (N, d)
+
+    # 3. Compute per-row margins: (N, k) where margins[j, i] = G[i] @ y_j - g[i]
+    margins = y_samples_np @ G.T - g[None, :]
+
+    # 4. Joint AND check: max row margin per sample
+    max_margin_per_sample = margins.max(axis=1)  # (N,)
+
+    # 5. Worst sample = one with MIN max-margin (deepest inside / least safely outside)
+    worst_idx = int(np.argmin(max_margin_per_sample))
+    worst_margin = float(max_margin_per_sample[worst_idx])
+
+    # 6. Disjoint iff every sample has max margin > 0 (none inside polyhedron)
+    disjoint = bool(worst_margin > 0)
+
+    epsilon_2 = math.log(1.0 / beta_2) / n_samples
+    result = HalfSpaceDisjointResult(
+        disjoint=disjoint,
+        worst_sample=y_samples_np[worst_idx],
+        worst_max_margin=worst_margin,
+        epsilon_2=epsilon_2,
+        n_samples_used=n_samples,
+    )
+
+    # Adaptive escalation: re-run with more samples if the certification
+    # was marginal (worst margin in (0, adaptive_threshold]). The smaller-N
+    # run is treated as a heuristic gate; the larger-N run becomes the
+    # actual hypothesis test, so epsilon_2 reflects the larger N.
+    if (
+        result.disjoint
+        and adaptive_threshold is not None
+        and adaptive_n_samples is not None
+        and 0 < result.worst_max_margin <= adaptive_threshold
+    ):
+        return certify_halfspace_disjoint(
+            flow_ode=flow_ode, threshold_q=threshold_q, halfspace=halfspace,
+            n_samples=adaptive_n_samples, beta_2=beta_2,
+            t=t, n_ode_steps=n_ode_steps, ode_method=ode_method,
+            ode_atol=ode_atol, ode_rtol=ode_rtol,
+            seed=(seed + 1 if seed is not None else None),
+            # No further escalation — pass adaptive_*=None
+            adaptive_threshold=None, adaptive_n_samples=None,
+            sampling_strategy=sampling_strategy,
+        )
+
+    return result
+
+
+def certify_group_disjoint(
+    flow_ode,
+    threshold_q: float,
+    group: list,  # list[HalfSpace]
+    *,
+    n_samples: int,
+    beta_2: float,
+    t: float = 1.0,
+    n_ode_steps: int = 30,
+    ode_method: str = 'rk4',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
+    seed: 'int | None' = None,
+    adaptive_threshold: 'float | None' = None,
+    adaptive_n_samples: 'int | None' = None,
+    sampling_strategy: str = 'uniform',
+) -> GroupDisjointResult:
+    """Certify a group (OR of HalfSpaces) disjoint from the flow set.
+
+    A group is disjoint iff EVERY HalfSpace in it is disjoint. Bonferroni
+    across the group members: epsilon_2_group = sum of per-HS epsilon_2
+    (which respects per-HS adaptive escalation when triggered).
+
+    Implementation notes:
+      - When ``seed`` is set, every member HalfSpace check sees the SAME
+        latent samples (because `sample_truncated_gaussian_ball` reseeds
+        numpy's global RNG on each call). Bonferroni is valid under
+        arbitrary sample dependence across members, so this is sound.
+      - Early exit: the first not-disjoint HalfSpace short-circuits the
+        loop. As a result, ``per_hs_results`` may have fewer entries
+        than ``len(group)`` when the group is not disjoint. Always has
+        at least one entry (the failing member).
+
+    Args:
+        flow_ode: trained FlowODE.
+        threshold_q: calibrated conformal threshold.
+        group: list of HalfSpace objects (the OR members of the group).
+        n_samples: scenario sample count N, shared across all HalfSpace checks.
+        beta_2: scenario confidence-failure probability.
+        t, n_ode_steps, ode_method, ode_atol, ode_rtol, seed: passed to
+            certify_halfspace_disjoint for each member.
+        adaptive_threshold, adaptive_n_samples: forwarded to each
+            certify_halfspace_disjoint call. See its docstring for
+            semantics.
+        sampling_strategy: forwarded to each certify_halfspace_disjoint
+            call. See :func:`certify_halfspace_disjoint` for semantics.
+
+    Returns:
+        GroupDisjointResult.
+
+    Raises:
+        ValueError: if the group is empty.
+    """
+    if len(group) == 0:
+        raise ValueError("group must be non-empty")
+
+    per_hs_results = []
+    for hs in group:
+        r = certify_halfspace_disjoint(
+            flow_ode=flow_ode, threshold_q=threshold_q, halfspace=hs,
+            n_samples=n_samples, beta_2=beta_2,
+            t=t, n_ode_steps=n_ode_steps, ode_method=ode_method,
+            ode_atol=ode_atol, ode_rtol=ode_rtol, seed=seed,
+            adaptive_threshold=adaptive_threshold,
+            adaptive_n_samples=adaptive_n_samples,
+            sampling_strategy=sampling_strategy,
+        )
+        per_hs_results.append(r)
+        if not r.disjoint:
+            # Group semantics (OR): one not-disjoint HalfSpace means the
+            # group is not disjoint regardless of the rest. Skip the rest
+            # to save compute — each certify_halfspace_disjoint call is ~25s.
+            break
+
+    disjoint = all(r.disjoint for r in per_hs_results)
+    return GroupDisjointResult(
+        disjoint=disjoint,
+        per_hs_results=per_hs_results,
+        # Sum per-HS epsilon_2 to respect adaptive escalation per-HS.
+        # Bonferroni still holds because each HS test is an independent
+        # hypothesis test and the bound is the sum of per-test epsilons.
+        epsilon_2=sum(r.epsilon_2 for r in per_hs_results),
+        n_samples_used=n_samples,
+    )
+
+
+def certify_spec_disjoint(
+    flow_ode,
+    threshold_q: float,
+    spec_groups: list,  # list[list[HalfSpace]]
+    *,
+    n_samples: int,
+    beta_2: float,
+    t: float = 1.0,
+    n_ode_steps: int = 30,
+    ode_method: str = 'rk4',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
+    seed: 'int | None' = None,
+    adaptive_threshold: 'float | None' = None,
+    adaptive_n_samples: 'int | None' = None,
+    sampling_strategy: str = 'uniform',
+) -> SpecDisjointResult:
+    """Certify UNSAT for an AND-of-OR-of-AND spec.
+
+    ``spec_groups`` is the canonical list-of-list-of-HalfSpace shape
+    produced by ``n2v.utils.verify_specification._parse_property_groups``.
+    Outer list: AND across groups. Inner list: OR within a group.
+    Each HalfSpace: AND across its rows.
+
+    UNSAT iff ANY group is disjoint from the flow set. Uses layer 2
+    (``certify_group_disjoint``) on each group, returning as soon as
+    one succeeds (early exit).
+
+    Bonferroni over ALL HalfSpace hypothesis tests actually performed,
+    summing each per-HS epsilon_2 (which respects adaptive escalation
+    when it triggers).
+
+    Args:
+        flow_ode: trained FlowODE.
+        threshold_q: calibrated conformal threshold.
+        spec_groups: list[list[HalfSpace]] in canonical n2v form.
+        n_samples, beta_2: scenario parameters.
+        t, n_ode_steps, ode_method, ode_atol, ode_rtol, seed: passed
+            through to layer 2 (and ultimately layer 1).
+        adaptive_threshold, adaptive_n_samples: forwarded to layer 2
+            (and ultimately layer 1). See certify_halfspace_disjoint
+            for semantics.
+        sampling_strategy: forwarded to layer 2 (and ultimately layer 1).
+            See :func:`certify_halfspace_disjoint` for semantics.
+
+    Returns:
+        SpecDisjointResult.
+
+    Raises:
+        ValueError: if ``spec_groups`` is empty.
+    """
+    if len(spec_groups) == 0:
+        raise ValueError("spec_groups must be non-empty")
+
+    per_group_results = []
+    certifying_group_idx = None
+    for idx, group in enumerate(spec_groups):
+        gr = certify_group_disjoint(
+            flow_ode=flow_ode, threshold_q=threshold_q, group=group,
+            n_samples=n_samples, beta_2=beta_2,
+            t=t, n_ode_steps=n_ode_steps, ode_method=ode_method,
+            ode_atol=ode_atol, ode_rtol=ode_rtol, seed=seed,
+            adaptive_threshold=adaptive_threshold,
+            adaptive_n_samples=adaptive_n_samples,
+            sampling_strategy=sampling_strategy,
+        )
+        per_group_results.append(gr)
+        if gr.disjoint:
+            certifying_group_idx = idx
+            # Early exit: one disjoint group certifies UNSAT; no need
+            # to test remaining groups.
+            break
+
+    unsat_certified = certifying_group_idx is not None
+    return SpecDisjointResult(
+        unsat_certified=unsat_certified,
+        certifying_group_idx=certifying_group_idx,
+        per_group_results=per_group_results,
+        # Sum per-group epsilon_2 to respect adaptive escalation per-HS.
+        epsilon_2=sum(g.epsilon_2 for g in per_group_results),
+        n_samples_used=n_samples,
     )

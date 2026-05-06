@@ -57,78 +57,55 @@ def _train_small_flow(dim: int = 2, seed: int = 0):
     return FlowODE(vf.eval())
 
 
-def test_verify_spec_returns_required_keys():
-    from examples.FlowConformal.benchmarks._spec import verify_spec_on_flow
+def test_certify_spec_on_flow_single_halfspace():
+    """certify_spec_on_flow on a single unreachable HalfSpace: unsat_certified=True."""
+    from examples.FlowConformal.benchmarks._spec import certify_spec_on_flow
     from n2v.sets.halfspace import HalfSpace
-
     flow = _train_small_flow(dim=2, seed=0)
-    # A very loose spec that any reasonable flow reachset should satisfy.
-    hs = HalfSpace(np.array([[1.0, 0.0]]), np.array([[100.0]]))
-    result = verify_spec_on_flow(
-        flow_ode=flow,
-        threshold_q=5.0,
-        spec=hs,
-        input_lb=np.array([-1.0, -1.0]),
-        input_ub=np.array([1.0, 1.0]),
-        network=None,                # preimage search disabled
-        alpha=0.01,
-        delta_1=0.997,
-        beta_2=0.001,
-        n_samples=2000,
+    hs = HalfSpace(np.array([[1.0, 0.0]]), np.array([[-100.0]]))
+    result = certify_spec_on_flow(
+        flow_ode=flow, threshold_q=5.0, spec=hs,
+        n_samples=500, beta_2=0.001, seed=0,
     )
-    # Shape of the returned dict:
-    assert set(result.keys()) >= {
-        'verdict', 'epsilon_2', 'delta_2', 'n_samples_used',
-        'counterexample', 'per_constraint_results',
-    }
-    assert result['verdict'] in ('SAT', 'UNSAT', 'UNKNOWN')
+    assert result['unsat_certified'] is True
+    assert result['certifying_group_idx'] == 0
+    assert result['epsilon_2'] > 0
+    assert 0 < result['delta_2'] < 1
+    assert 'spec_summary' in result
 
 
-def test_verify_spec_rejects_or_of_ands():
-    """Lists of HalfSpaces should raise NotImplementedError in Phase 2."""
-    from examples.FlowConformal.benchmarks._spec import verify_spec_on_flow
+def test_certify_spec_on_flow_k_row_halfspace_joint_and():
+    """A k-row HalfSpace whose AND intersection is empty → unsat_certified=True."""
+    from examples.FlowConformal.benchmarks._spec import certify_spec_on_flow
     from n2v.sets.halfspace import HalfSpace
-
     flow = _train_small_flow(dim=2, seed=0)
-    a = HalfSpace(np.array([[1.0, 0.0]]), np.array([[1.0]]))
-    b = HalfSpace(np.array([[0.0, 1.0]]), np.array([[1.0]]))
-    with pytest.raises(NotImplementedError):
-        verify_spec_on_flow(
-            flow_ode=flow, threshold_q=1.0,
-            spec=[a, b],  # OR-of-ANDs
-            input_lb=np.array([-1.0, -1.0]),
-            input_ub=np.array([1.0, 1.0]),
-            network=None,
-            alpha=0.01, delta_1=0.997, beta_2=0.001, n_samples=500,
-        )
-
-
-def test_verify_spec_and_halfspace_loops_over_rows():
-    """A 3-row HalfSpace (AND of 3 constraints) should produce 3 per-
-    constraint results and a unified verdict.
-
-    VNN-LIB convention: ``G y <= g`` defines the UNSAFE region. Here
-    the rows encode an empty intersection (``y_0 <= -100 AND y_0 >= 100``
-    plus a third constraint), so the unsafe region is empty and every
-    reach set is trivially outside it — expect UNSAT.
-    """
-    from examples.FlowConformal.benchmarks._spec import verify_spec_on_flow
-    from n2v.sets.halfspace import HalfSpace
-
-    flow = _train_small_flow(dim=2, seed=0)
-    # Rows: y_0 <= -100, -y_0 <= -100 (i.e. y_0 >= 100), y_1 <= -100.
-    # The AND is empty → unsafe region is empty → UNSAT for any reach set.
+    # Contradictory rows: intersection is empty.
     hs = HalfSpace(
         np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]]),
         np.array([[-100.0], [-100.0], [-100.0]]),
     )
-    result = verify_spec_on_flow(
+    result = certify_spec_on_flow(
         flow_ode=flow, threshold_q=5.0, spec=hs,
-        input_lb=np.array([-1.0, -1.0]),
-        input_ub=np.array([1.0, 1.0]),
-        network=None,
-        alpha=0.01, delta_1=0.997, beta_2=0.001, n_samples=2000,
+        n_samples=500, beta_2=0.001, seed=0,
     )
-    assert len(result['per_constraint_results']) == 3
-    # Unsafe region empty → no reach set hits it → UNSAT (verified).
-    assert result['verdict'] == 'UNSAT'
+    assert result['unsat_certified'] is True
+
+
+def test_certify_spec_on_flow_list_of_dicts_now_supported():
+    """OR-of-ANDs (list[dict] / list[HalfSpace]) no longer raises
+    NotImplementedError — it's dispatched via layer 3."""
+    from examples.FlowConformal.benchmarks._spec import certify_spec_on_flow
+    from n2v.sets.halfspace import HalfSpace
+    flow = _train_small_flow(dim=2, seed=0)
+    # Two groups (AND across), each with one HalfSpace.
+    # Group 1: y_0 <= -100 (unreachable). Group 2: y_0 <= 100 (reachable).
+    # One group is disjoint → UNSAT.
+    spec = [
+        {'Hg': HalfSpace(np.array([[1.0, 0.0]]), np.array([[-100.0]]))},
+        {'Hg': HalfSpace(np.array([[1.0, 0.0]]), np.array([[100.0]]))},
+    ]
+    result = certify_spec_on_flow(
+        flow_ode=flow, threshold_q=5.0, spec=spec,
+        n_samples=500, beta_2=0.001, seed=0,
+    )
+    assert result['unsat_certified'] is True

@@ -101,6 +101,81 @@ def _parse_property_groups(property: Union[dict, List, HalfSpace]) -> List[List[
         raise TypeError(f"Property must be HalfSpace, list of HalfSpace, or dict with 'Hg' field, got {type(property)}")
 
 
+def distribute_and_of_or_of_and(
+    groups: List[List[HalfSpace]],
+) -> List[List[HalfSpace]]:
+    """Distribute AND-of-OR-of-AND-of-rows into a single OR-of-AND-of-rows.
+
+    Input is the canonical n2v ``List[List[HalfSpace]]`` shape returned
+    by :func:`_parse_property_groups`:
+
+    * Outer list: ``AND`` across groups (a point is unsafe iff every
+      group contains it).
+    * Each group is a list of ``HalfSpace`` (``OR`` within a group).
+    * Each ``HalfSpace`` itself encodes ``G y <= g`` row-wise (``AND``
+      over rows).
+
+    Output is a single-group ``List[List[HalfSpace]]`` (outer length 1)
+    where the inner list is the cartesian-product OR over all
+    per-group choices, and each compound ``HalfSpace`` stacks the rows
+    of the chosen per-group HalfSpaces. The unsafe-region semantics are
+    mathematically identical: ``OR over (H_i1, H_i2, ..., H_ik)`` of
+    ``(in H_i1) AND (in H_i2) AND ... AND (in H_ik)``.
+
+    This is the form AMLS-bounded estimators can correctly bound: each
+    compound disjunct's mass is the AND-conjunction mass (which is
+    what the verdict gate is actually trying to bound).
+
+    Cost: ``O(prod(group_sizes))`` compound HalfSpaces. For the
+    multi-group benchmarks in our sweep (lsnc_relu 13×1, metaroom 19×1,
+    malbeware 25×1) this is bounded and tractable.
+
+    Args:
+        groups: AND-of-OR shape from :func:`_parse_property_groups`.
+
+    Returns:
+        Single-group ``List[List[HalfSpace]]`` (outer length 1) in
+        OR-of-AND-of-rows form. If the input has length 1 and is
+        already a single-group OR (the common single-spec case), it is
+        returned unchanged for parity. If any group is empty, returns
+        ``[[]]`` representing a vacuously-empty unsafe region.
+    """
+    if len(groups) == 0:
+        # Empty AND of nothing is trivially True everywhere → unsafe
+        # region is the whole output space. We return a single-group
+        # empty disjunction; caller should treat that as "trivially
+        # unsafe" or raise.
+        return [[]]
+    if any(len(g) == 0 for g in groups):
+        # Empty OR within some group → that group is never satisfied
+        # → AND with it is always False → unsafe region empty. Return
+        # an empty disjunction (the caller's UNSAT check should fire
+        # trivially: no halfspaces to violate).
+        return [[]]
+    if len(groups) == 1:
+        # Already a single OR-of-AND group; no distribution to do.
+        return [list(groups[0])]
+
+    import itertools
+
+    compound_disjuncts: List[HalfSpace] = []
+    for combo in itertools.product(*groups):
+        # ``combo`` is a tuple of one HalfSpace from each group. The
+        # AND of these is a single HalfSpace whose rows are the row-
+        # concatenation of every member's rows, with the same RHS
+        # row-concatenation. Sound-by-construction: a point satisfies
+        # the AND iff it satisfies every row, iff it satisfies every
+        # member HalfSpace.
+        Gs = [np.asarray(hs.G, dtype=np.float64) for hs in combo]
+        gs = [np.asarray(hs.g, dtype=np.float64).reshape(-1, 1)
+              for hs in combo]
+        G_combined = np.concatenate(Gs, axis=0)
+        g_combined = np.concatenate(gs, axis=0)
+        compound_disjuncts.append(HalfSpace(G_combined, g_combined))
+
+    return [compound_disjuncts]
+
+
 def _group_disjoint_from_reach_set(group: List[HalfSpace], reach_set: list) -> bool:
     """
     Check if a group of halfspaces (OR) is disjoint from all reach sets.

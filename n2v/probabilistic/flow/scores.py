@@ -5,6 +5,9 @@ Each score maps a batch of output vectors to non-negative scalars.
 The sublevel set {y : score(y) <= q} defines the prediction region.
 """
 
+from __future__ import annotations
+
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -138,3 +141,56 @@ class FlowScore(NonconformityScore):
     def set_t(self, t: float):
         """Update the flow time parameter."""
         self.t = t
+
+
+class GMMScore(NonconformityScore):
+    """Negative log-likelihood under a fitted Gaussian Mixture Model.
+
+    score(y) = -log p_GMM(y) where p_GMM(y) = sum_k pi_k N(y | mu_k, Sigma_k).
+    The sublevel set {y : score(y) <= q} is the high-density region of
+    the GMM. Use ``GMMScore.fit(y_train, n_components)`` to fit a GMM
+    to a training set and wrap it as a score function.
+
+    Args:
+        gmm: a fitted ``sklearn.mixture.GaussianMixture`` instance.
+    """
+
+    def __init__(self, gmm):
+        self.gmm = gmm
+
+    @classmethod
+    def fit(
+        cls,
+        y_train,
+        n_components: int = 10,
+        *,
+        covariance_type: str = 'full',
+        reg_covar: float = 1e-6,
+        max_iter: int = 200,
+        random_state: int = 0,
+    ) -> 'GMMScore':
+        """Fit a GaussianMixture to ``y_train`` and return a GMMScore."""
+        from sklearn.mixture import GaussianMixture
+        if isinstance(y_train, torch.Tensor):
+            y_np = y_train.detach().cpu().numpy()
+        else:
+            y_np = np.asarray(y_train)
+        gmm = GaussianMixture(
+            n_components=n_components, covariance_type=covariance_type,
+            reg_covar=reg_covar, max_iter=max_iter, random_state=random_state,
+        )
+        gmm.fit(y_np)
+        return cls(gmm)
+
+    def __call__(self, y: Tensor) -> Tensor:
+        if isinstance(y, torch.Tensor):
+            y_np = y.detach().cpu().numpy()
+            device, dtype = y.device, y.dtype
+        else:
+            y_np = np.asarray(y)
+            device, dtype = None, torch.float32
+        logp = self.gmm.score_samples(y_np)  # log p(y), shape (N,)
+        out = torch.as_tensor(-logp, dtype=dtype)
+        if device is not None:
+            out = out.to(device)
+        return out
