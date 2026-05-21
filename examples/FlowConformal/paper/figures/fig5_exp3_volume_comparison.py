@@ -71,7 +71,7 @@ METHOD_STYLES: dict[str, dict] = {
     'ours':             dict(color=METHOD_COLORS['ours'],
                              marker='D', label='Ours'),
     'hashemi_clipping': dict(color=METHOD_COLORS['hashemi_clipping'],
-                             marker='s', label='CLIP'),
+                             marker='s', label='Clipping-Block'),
     'starset':          dict(color='#a50f15',
                              marker='^', label='Star (approx)'),
 }

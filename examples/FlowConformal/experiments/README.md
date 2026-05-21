@@ -1,26 +1,24 @@
 # FlowConformal — Paper Experiments
 
-Authoritative description of the four paper experiments + ablation
-suite + soundness audit, together with their setup, expected outputs,
-and execution order. **Read this first before running any experiment.**
-The general framework, probabilistic claims, and Phase 5e bounded-AMLS
-design are documented in
-[`.claude/research/flow-matching-probabilistic-reach/`](../../../.claude/research/flow-matching-probabilistic-reach/)
-and [`docs/research/2026-04-28-bounded-amls-design.md`](../../../docs/research/2026-04-28-bounded-amls-design.md).
+Authoritative description of the four paper experiments + the
+verification-method ablation, including setup, headline results, and
+execution order. Each section includes a paper-ready summary suitable
+for the writeup.
 
-CSV column-level schema for every output CSV is at
-[`CSV_SCHEMAS.md`](../CSV_SCHEMAS.md). Schemas in this
-README are summary snapshots; the canonical column list lives there
-and is what the figure / table generators consume.
+CSV column-level schema for every output is at
+[`../CSV_SCHEMAS.md`](../CSV_SCHEMAS.md). The single canonical sweep
+launcher is
+[`run_paper_sweeps.sh`](run_paper_sweeps.sh)
+(use `--phase exp1|exp2|exp3|exp4|ablation|all`).
 
 ---
 
 ## Common conventions
 
-### Seeding (cross-experiment, cross-tool, order-independent reproducibility)
+### Seeding (cross-experiment, cross-tool, order-independent)
 
-**Single global seed: `SEED = 47`.** Every per-(benchmark, tool) script
-resets the RNG at the start of *each instance's pipeline*:
+**Single global seed: `SEED = 47`.** Every per-(benchmark, tool)
+runner resets the RNG at the start of each instance's pipeline:
 
 ```python
 SEED = 47
@@ -30,381 +28,408 @@ for onnx_rel, vnn_rel in instances:
     row = run_pipeline(network, lb, ub, spec, seed=SEED, ...)
 ```
 
-This gives us four guarantees:
+Guarantees: (1) bit-identical CSVs on rerun, (2) order-independence
+(reordering instances doesn't change rows), (3) tool-independence at
+the instance setup level (ours / Hashemi / αβ-CROWN see the same
+input box, calibration data, and spec for any given instance), and
+(4) one number to remember.
 
-1. **Reproducibility** — same script + `SEED=47` → bit-identical CSV.
-2. **Order-independence** — the RNG is reset before each instance's
-   pipeline, so reordering instances within the sweep doesn't change
-   any row.
-3. **Tool-independence for the instance setup** — ours,
-   Hashemi-clipping, αβ-CROWN all start each instance from the same
-   RNG state, so they see identical input boxes, calibration data,
-   and spec.
-4. **Maximum simplicity** — one number to remember. "I used `SEED=47`
-   for everything."
-
-**For VNN-COMP benchmarks** (Exp 1, Exp 2): the instance is fully
-identified by `(onnx_rel, vnn_rel)` from each benchmark's
-`instances.csv`; pipeline RNG is reset to `SEED=47` per instance.
-
-**For synthetic benchmarks** (Exp 3, Exp 4): the instances themselves
-have to be deterministically *different* across `instance_idx`, so
-their *generation* uses a separate RNG seeded as
-`np.random.RandomState(hash((depth, instance_idx)) & 0x7FFFFFFF)` —
-this produces a unique `x_0` for each Exp 4 instance, and a unique
-geometric transform for each Exp 3 instance. Once the instance is
-generated, the verification pipeline for it uses `SEED=47` exactly
-as for VNN-COMP.
-
-**Historical Phase 5e ACAS Xu sweep — superseded.** The earlier
-ACAS Xu CSV (run with `seed = hash((onnx_rel, vnn_rel)) & 0x7FFFFFFF`,
-the older per-instance scheme) has been archived to
-`.claude/research/flow-matching-probabilistic-reach/_archive/acasxu_phase5_sweeps/`.
-Under the new SEED=47 convention, ACAS Xu is now produced as a
-first-class Phase 1 cell (`exp1_acasxu_2023_ours.csv`) — wall ~3 hr,
-single source of truth shared with the other six Exp 1 benchmarks.
-
-We pay one cost: for ours, the flow is retrained per script invocation
-(since each tool has its own script). That overhead is modest (~30s
-of ~80s total per instance) and the architectural simplification is
-worth it.
+For synthetic benchmarks (Exp 3, Exp 4), the *instance* itself is
+deterministically generated via a separate per-instance hash seed
+(`hash((depth, instance_idx)) & 0x7FFFFFFF` for Exp 4, the random
+weight init for synth_<N>d networks for Exp 3). Once the instance is
+produced, the verification pipeline uses `SEED=47` exactly as for
+VNN-COMP benchmarks.
 
 ### Output paths
 
-All per-experiment outputs go under
+Per-experiment outputs go under
 `examples/FlowConformal/experiments/<exp_dir>/outputs/<filename>.csv`
-with a method tag in the filename, e.g.
-`exp1_collins_rul_cnn_2022_ours.csv`,
-`exp1_collins_rul_cnn_2022_hashemi_clipping.csv`.
-
-Aggregate / comparison tables live at the same level with names like
-`exp1_comparison_table.csv`.
+with a method tag in the filename (e.g.
+`exp1_acasxu_2023_ours.csv`). The paper-table / paper-figure
+generators under `examples/FlowConformal/paper/` read these CSVs
+directly — no intermediate aggregate step.
 
 ### Verdicts
 
-`verdict` ∈ `{UNSAT, SAT, UNKNOWN, TIMEOUT, ERROR, SKIPPED, NOT_APPLICABLE}`.
+`verdict ∈ {UNSAT, SAT, UNKNOWN, TIMEOUT, ERROR, SKIPPED, NOT_APPLICABLE}`.
 
 ### Ground truth
 
-For Exp 1 and Exp 2, ground truth comes from VNN-COMP 2025 sound-
-verifier consensus (αβ-CROWN ∪ NeuralSAT ∪ PyRAT ∪ NNV ∪ NNEnum) read
-from `~/v/other/VNNCOMP/vnncomp2025_results/<tool>/<bench_dir>/results.csv`.
-A verdict is `sat` iff *any* sound verifier returned sat; same for
-`unsat`; `conflict` if both appear; `unknown` if neither.
+For Exp 1 / Exp 2: the SAT-wins consensus across the eight VNN-COMP
+2025 sound verifiers, pre-computed by `build_ground_truth.py` and
+committed at `exp{1,2}_*/ground_truth.csv`.
 
-For Exp 3 ground truth is computed analytically (1-Lipschitz
-networks with closed-form reach sets) or via αβ-CROWN on the synthetic
-networks.
+For Exp 3: closed-form `|det(W_total)| · prod(ub-lb)` for
+identity-activation 1-Lipschitz nets; cached MC reach-set volume
+(`exact_volumes.py`) for the bananas.
 
-For Exp 4 ground truth is **UNSAT-by-construction** (Lipschitz-bounded
-networks with specs at empirical-max + 0.1).
-
----
-
-## Experiment 1 — Sound-Verifier Comparison
-
-| | |
-|---|---|
-| **Goal** | Demonstrate ours is sound (0% FUR) where Hashemi-clipping isn't (~25–28% FUR at small `m`) at VNN-COMP-budget. |
-| **Benchmarks** | `acasxu_2023`, `collins_rul_cnn_2022`, `dist_shift_2023`, `linearizenn_2024`, `tllverify_2023`, `malbeware`, `metaroom_2023`. (`vit_2023` was dropped — it appears in Exp 2 with the same hparams. `malbeware` (malware classification, 25 classes, 4096-d, 100s/row) and `metaroom_2023` (indoor-scene CNN, 20 classes, 5376-d, 210s/row) added for image-classification breadth; both use `verification_method='amls_bounded_union'` to fold their 19–24 disjuncts into a single AMLS chain — the same trick cifar100 uses in Exp 2.) |
-| **Methods** | ours (bounded AMLS, locked per-benchmark configs), **Hashemi-clipping** (m=8000). Sound verifiers (αβ-CROWN, NeuralSAT, PyRAT, NNV, NNEnum, CORA, ROVER, sobolbox) read from VNN-COMP CSVs — no compute by us. Ground truth uses the SAT-wins rule across all 8 sound tools (see ``ground_truth.csv``). |
-| **Per-benchmark hparam overrides** | Each benchmark's locked config lives in `exp1_vnncomp_subset/_benchmarks.py:PER_BENCHMARK_CONFIG`. **acasxu_2023**: `base` (n_train=5K, flow_epochs=2K, scenario_n=2K, max_levels=30). **collins_rul_cnn_2022**: `small` (1K/1K/500). **dist_shift_2023, linearizenn_2024, tllverify_2023**: `mega` (10K/2K/2K, max_levels=30). **metaroom_2023**: `mega` + `verification_method='amls_bounded_union'` (folds the 19-disjunct K-class spec into a single AMLS chain — same trick cifar100 uses in Exp 2). |
-| **Falsifier** | **ON** for both ours and Hashemi-clipping with **identical** per-benchmark APGD-only budgets (most benchmarks `(n_restarts=3, n_steps=25)`, `dist_shift_2023` `(5, 50)`). Both call the same [`n2v.utils.falsify.falsify`](../../../n2v/utils/falsify.py) entrypoint with the same kwargs, so the only methodological difference between ours and Hashemi is the score function and calibrated set's geometry. |
-| **K seeds** | K=1 |
-| **N instances per benchmark** | full per-benchmark VNN-COMP `instances.csv` (range: ~30–186) |
-| **Per-row VNN-COMP timeout** | yes — read from each `instances.csv` column 3 |
-| **CSV outputs** | `exp1_<benchmark>_ours.csv`, `exp1_<benchmark>_hashemi_clipping.csv`, `exp1_<benchmark>_hashemi_naive.csv` (optional) |
-| **Aggregate** | `exp1_comparison_table.csv` — one row per (benchmark, method) summarising verdict counts, walls, FUR |
-| **Wall (compute by us)** | ours ~6–8 hr · Hashemi-clipping ~3–4 hr · *Hashemi-naive ~2–3 hr if run* |
-
-### Expected per-instance CSV schema (columns)
-```
-benchmark, instance, method, verdict, wall_s, vnncomp_timeout_s,
-coverage_empirical, coverage_n_test, q, epsilon_total, delta_total,
-amls_bounded_eps_2_upper, amls_bounded_detected_unsafe,
-amls_levels_used, ground_truth, ground_truth_source,
-soundness_flag, error, timestamp
-```
-See [`CSV_SCHEMAS.md` §1](../CSV_SCHEMAS.md#1-experiment-1--vnn-comp-subset-sound-verifier-comparison) for full column defs.
-
-### What's NOT in Exp 1 (per design)
-- `cora_2024` — calibration-miss-infeasible at 30s budget
-- `safenlp_2024` — calibration-miss-infeasible at 20s budget
-- `vit_2023` — dropped from Exp 1 (lives in Exp 2 with identical hparams; no point running twice)
-- `cifar100_2024` — too large; appears in Exp 2
-- `sat_relu` — initially considered as cora replacement, rejected (focused on stable benchmark set)
+For Exp 4: UNSAT-by-construction (the spec threshold is set to
+`empirical_max(y) + 0.1` where the max is taken over a 100K-sample MC
+of the input box; for a 1-Lipschitz net this is reachable only with
+vanishing probability).
 
 ---
 
-## Experiment 2 — Probabilistic-Scale Comparison
+## Experiment 1 — VNN-COMP sound-verifier comparison
 
 | | |
 |---|---|
-| **Goal** | Probabilistic methods at scale — ours vs Hashemi-clipping + RS + SAVER + ProbStar where applicable. αβ-CROWN as sole sound reference. |
-| **Benchmarks** | `cifar10_resnet110` (1.7M params, Cohen RS pretrained), `cifar100_2024` (2.5M params, ResNet-medium), `vit_2023` (76K params, 10-class ViT), `tinyimagenet_2024` (2.5M params, ResNet-medium, 200 classes) |
-| **Methods (Tier-A — main results)** | ours (bounded AMLS, locked configs), **Hashemi-clipping** (m=8000), αβ-CROWN (computed by us this time, since some Exp 2 configs differ from VNN-COMP), **RS** (image classification only — applies to cifar10_resnet110, cifar100_2024) |
-| **Methods (Tier-B — appendix, run if time)** | **ProbStar** (now that Gurobi is installed, run on benchmarks where the network is piecewise-linear — likely cifar10_resnet110, vit_2023; not cifar100/tinyimagenet's ResNet-medium with bn), **SAVER** (single-disjunct only — currently no Exp 2 benchmark with a 1-disjunct classification spec) |
-| **Per-benchmark hparam overrides** | All four benchmarks use the same config: `mega` (n_train=10K, flow_epochs=2K, scenario_n=2K) + `verification_method='amls_bounded_union'` + `amls_max_levels=30`. The four specs are all multi-class disjunctive (cora-style nested OR — 9, 99, 199, 9 disjuncts respectively), so the union method handles them uniformly. cifar10_resnet110 uses 300s timeout (no VNN-COMP equivalent), the others use the canonical 100s VNN-COMP per-row budget. |
-| **Falsifier** | **ON** for both ours and Hashemi-clipping with the same per-benchmark APGD budgets as Exp 1. Three of the four Exp 2 benchmarks are VNN-COMP and the fourth (`cifar10_resnet110`) is the same architecture family; keeping the falsify-first scaffold is consistent with the sound-verifier comparison. αβ-CROWN's intrinsic PGD-warmstart is inherent to that tool. RS / ProbStar / SaVer run on their own terms (no external falsification). |
-| **K seeds** | K=1 |
-| **N instances per benchmark** | 100 |
-| **Timeouts** | **100s** per-row for vit_2023 / cifar100_2024 / tinyimagenet_2024 (matches VNN-COMP 2023/2024); **300s** for cifar10_resnet110 (no published VNN-COMP timeout) |
-| **CSV outputs** | `exp2_<benchmark>_ours.csv`, `exp2_<benchmark>_hashemi_clipping.csv`, `exp2_<benchmark>_alpha_beta_crown.csv`, `exp2_<benchmark>_rs.csv`, *(later)* `exp2_<benchmark>_probstar.csv`, `exp2_<benchmark>_saver.csv` |
-| **Aggregate** | `exp2_comparison_table.csv` |
-| **Wall** | Tier-A: ours ~10–12 hr · Hashemi-clipping ~4 hr · αβ-CROWN ~6–10 hr · RS ~2 hr | Tier-B (later): ProbStar ~3–5 hr · SAVER ~1 hr |
+| **Goal** | Probabilistic flow-conformal vs the eight published VNN-COMP'25 sound verifiers on six standard benchmarks. Demonstrate parity with sound verifiers on benchmarks they handle well, and competitive recall where they time out. |
+| **Benchmarks (6)** | `acasxu_2023`, `collins_rul_cnn_2022`, `dist_shift_2023`, `linearizenn_2024`, `tllverify_2023`, `metaroom_2023` |
+| **Methods** | ours (bounded AMLS), Hashemi-clipping (m=8000), Hashemi-clipping-PCA (metaroom only, m=8000, K=10 components), SaVer, ProbStar. Sound-verifier rows (αβ-CROWN, NeuralSAT, PyRAT, CORA) read from VNN-COMP 2025 `results.csv` — no compute by us. |
+| **Per-benchmark hparams** | Locked in `exp1_vnncomp_subset/_benchmarks.py:PER_BENCHMARK_CONFIG`. Most use `mega` (n_train=10K, flow_epochs=2K, scenario_n=2K); ACAS Xu uses `base` (5K/2K/2K), collins_rul_cnn uses `small` (1K/1K/500). Falsifier ON for ours and Hashemi with identical APGD budgets. |
+| **N instances per benchmark** | full per-benchmark VNN-COMP `instances.csv` (range: 33–186) |
+| **Per-row timeout** | from each `instances.csv` column 3 (VNN-COMP 2025 budget) |
+| **Outputs** | `exp1_<benchmark>_<method>.csv` |
+| **Wall (full sweep)** | ~2-3 hours |
 
-### Expected per-instance CSV schema
-Same as Exp 1, plus method-specific columns:
-- RS: `sigma`, `n0`, `n_certify`, `alpha`, `pred_class`, `true_class`, `l2_radius`, `eps_linf_threshold_l2`
-- ProbStar: `n_pieces`, `prob_unsafe`, `confidence`
-- SAVER: `n_samples`, `epsilon`, `confidence`
+### Description
 
-See [`CSV_SCHEMAS.md` §2](../CSV_SCHEMAS.md#2-experiment-2--probabilistic-scale-comparison).
+Six benchmarks from VNN-COMP 2025 span the standard verifier-comparison
+roster: ACAS Xu policy networks (5-input MLPs with K-disjunct
+classification specs); RUL-prediction regression
+(`collins_rul_cnn_2022`); input-distribution-shift specs
+(`dist_shift_2023`); small linearised networks
+(`linearizenn_2024`); deep ReLU MLPs from the TLL-verify generator
+(`tllverify_2023`); and the metaroom indoor-scene CNN
+(`metaroom_2023`, 19-class disjunctive output spec).
+
+Each benchmark uses the VNN-COMP 2025 published `instances.csv` to
+fix the per-instance input box, the unsafe halfspace, and the
+per-instance shell timeout. We run our method and three probabilistic
+baselines (Hashemi-clipping, SaVer, ProbStar) on every instance under
+that timeout. The four sound verifiers from VNN-COMP 2025
+(αβ-CROWN, NeuralSAT, PyRAT, CORA) are *not* re-run — we read their
+published `results.csv` directly so the comparison is against
+exactly the numbers the verifier authors reported.
+
+Ground truth for each instance is the SAT-wins consensus across the
+eight VNN-COMP 2025 sound tools; instances where every sound tool
+timed out *without* a SAT counter-example are folded into "effective
+UNSAT" so a method that abstains on the hardest instances is
+correctly penalised in the recall denominator.
+
+Two headline tables are produced:
+
+- `paper/tables/main_table.tex` — `% Solved` per (method, benchmark),
+  i.e. fraction of instances correctly decided (Verified UNSAT or
+  Falsified SAT) under the SAT-wins ground truth.
+- `paper/tables/main_table_recall_compact.tex` — UNSAT-recall (the
+  fraction of effective-UNSAT instances correctly certified UNSAT),
+  with sound-violation counts annotated as daggers.
+
+This experiment establishes the headline soundness-and-recall claim
+of the paper: probabilistic flow-conformal certification is
+competitive with sound verification on standard VNN-COMP benchmarks
+under matched per-instance budgets.
 
 ---
 
-## Experiment 3 — Synthetic Geometric Validation
+## Experiment 2 — Probabilistic-scale comparison
 
 | | |
 |---|---|
-| **Goal** | Demonstrate the flow-shape advantage on **non-axis-aligned** output distributions where Hashemi's hyperrect bbox is intrinsically loose. Volume-comparable comparison. |
-| **Benchmarks** | (a) **3D banana classifier** (`ThreeBlobClassifier3D` — three multimodal blobs with curved separators); (b) **5D / 10D / 20D 1-Lipschitz networks** with identity activation (closed-form exact volume); (c) **Geometric-transformation suite** — axis-aligned / rotated / translated / nonlinear input-set transforms applied to a base network, to stress geometry-awareness against fixed-form scores. |
-| **Methods (combined with score-function ablation)** | ours with **4 score families**: hyperrect, ellipsoid (Mahalanobis), GMM (k=3), flow (FlowScore — naive). Plus Hashemi-naive, Hashemi-clipping. |
-| **Spec types per benchmark** | (a) **trivially-UNSAT** spec (unsafe far from data) — should always be UNSAT; (b) **reachable-SAT** spec (unsafe inside reach support) — falsifier OFF, so ours should output UNKNOWN (validates honest-abstention behavior). |
-| **K seeds** | K=5 |
-| **CSV outputs** | `exp3_<benchmark>_<score>.csv` (one per score family per benchmark) |
-| **Aggregate** | `exp3_volume_comparison.csv`, `exp3_geo_transforms.csv` |
-| **Wall** | ~6–10 hr |
+| **Goal** | Three image-classification benchmarks (ViT, ResNet-medium) where every published sound verifier hits its 100s budget on a substantial fraction of instances. Show that probabilistic flow-conformal scales when sound verification doesn't. |
+| **Benchmarks (3)** | `vit_2023` (76K-param 10-class ViT, 200 instances), `tinyimagenet_2024` (2.5M-param ResNet-medium, 200-class, 200 instances), `cifar100_2024` (2.5M-param ResNet-medium, 100-class, 200 instances) |
+| **Methods** | ours (mega + `amls_bounded_union`), Hashemi-clipping-PCA (m=2500, K=32 PCA components), SaVer, ProbStar, RS (cifar100 only). Sound-verifier rows again from VNN-COMP 2025 `results.csv`. |
+| **Per-benchmark hparams** | All three use the same locked config: `mega` (n_train=10K, flow_epochs=2K, scenario_n=2K) + `verification_method='amls_bounded_union'` + `amls_max_levels=30`. The cora-style nested-OR specs (9 / 99 / 199 disjuncts respectively) are folded into a single AMLS chain via the union variant. |
+| **N instances per benchmark** | 200 (full benchmark) |
+| **Per-row timeout** | 100s (matches VNN-COMP 2025) |
+| **Outputs** | `exp2_<benchmark>_<method>.csv` |
+| **Wall (full sweep)** | ~3-4 hours |
 
-### Expected per-instance CSV schema
-```
-benchmark, score_function, seed, verdict,
-volume_estimate, volume_exact, volume_ratio,
-coverage_empirical, q, wall_s, error
-```
-Volume measurements are in the network's output space; `volume_exact`
-is computable analytically for the 1-Lipschitz cells and via fine-grid
-exhaustive sampling for the banana.
+### Description
 
-See [`CSV_SCHEMAS.md` §3](../CSV_SCHEMAS.md#3-experiment-3--synthetic-volume-comparison).
+The three benchmarks (ViT, ResNet-medium-100, ResNet-medium-200) are
+the high-output-dim subset of VNN-COMP 2025 and share an
+architectural property that stresses sound verification: every
+published sound verifier hits its 100s budget on a substantial
+fraction of instances. The specs are cora-style nested ORs (9, 99,
+and 199 disjuncts respectively) — a K-class robustness predicate
+that asks "is the predicted class robust to all `K-1` competing
+classes within the L∞ ball".
+
+All three benchmarks share the same locked configuration: `mega`
+training (n_train=10K, flow_epochs=2K, scenario_n=2K) with
+`verification_method='amls_bounded_union'`. The union variant folds
+the K-disjunct OR into a single AMLS chain on
+`phi_union(y) = min_j phi_halfspace_j(y)` instead of K parallel
+chains, giving a tight K× speedup at no soundness cost.
+
+The Hashemi-clipping baseline at m=8000 fails on these benchmarks —
+every UNSAT instance times out at 100s under raw `clipping_block`
+because the surrogate solves K LPs per sample. We instead report the
+PCA-projected variant (K=32 components, m=2500) which is
+wall-matched to ours at ~50 s/instance and is the variant the
+paper table reports as the "CLIP" row.
+
+Per-row timeout = 100s (matches VNN-COMP 2025). We run all 200
+instances per benchmark. Ground truth and the headline tables are
+produced via the same pipeline as Exp 1 — these three rows complete
+the 9-benchmark table in `main_table*.tex`.
+
+This experiment isolates the *probabilistic-scale* story: when sound
+verification hits its budget on large image-classification networks,
+how do probabilistic methods compare against each other and against
+the published sound-verifier numbers under matched compute?
 
 ---
 
-## Experiment 4 — Controlled Scaling **(NEW)**
+## Experiment 3 — Synthetic volume comparison
 
 | | |
 |---|---|
-| **Goal** | Demonstrate sub-exponential scaling of ours vs the exponential blow-up of sound verifiers on a controlled network family. The headline plot is wall-time vs network size, with TIMEOUT counts. |
-| **Network family** | 7 spectrally-normalized ReLU MLPs with random Gaussian weights, **fixed width W=512**, depths `D ∈ {2, 4, 8, 16, 24, 32, 40}`. Param range **4K → 10M** (4 orders of magnitude). One network per depth (no init-seed variation). |
-| **Verification problems per network** | **10 instances** generated as follows: pick a random "starting sample" `x_0 ~ Uniform([-1, 1]^5)`; the input box is the L∞ ball `[x_0 - eps, x_0 + eps]` (eps fixed at 0.1); the spec is `y > C` where `C = empirical_max(y over input box) + 0.1` — UNSAT by 1-Lipschitz construction. Each of the 10 instances has a different randomly-sampled `x_0`. |
-| **Methods** | **ours (bounded AMLS, mega), αβ-CROWN, NeuralSAT, Hashemi-clipping (m=8000)** — all 4 are run *by us* on the synthetic networks (no VNN-COMP CSVs since the networks aren't standard VNN-COMP benchmarks). αβ-CROWN uses a custom config ([`abcrown_exp4_deep_mlp.yaml`](exp4_scaling/abcrown_exp4_deep_mlp.yaml)) tuned for deep ReLU MLPs (bs=1024, no PGD, input-split BaB) plus `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for OOM mitigation. **Expected sound-verifier failure modes** at deeper depths are documented in [`.claude/research/flow-matching-probabilistic-reach/sound-verifier-limitations.md`](../../../.claude/research/flow-matching-probabilistic-reach/sound-verifier-limitations.md): αβ-CROWN exhibits genuine exponential BaB-tree blowup (TIMEOUT at d ≥ 24); NeuralSAT exhibits abstractor saturation (UNKNOWN/`early_stop` at d ≥ 16). |
+| **Goal** | Quantify the *tightness* of each method's predicted reach set against an analytically- or MC-known ground-truth volume. Demonstrates the geometry advantage of flow-conformal that doesn't show up in coarse verdict statistics on far-away halfspace specs. |
+| **Benchmarks (7)** | `2d_banana` (RotatedBananaNet on `[0, 1]²`), `3d_banana` (ThreeBlobClassifier3D on `[-1, 1]³`), `synth_2d`, `synth_3d`, `synth_5d`, `synth_10d`, `synth_20d` (identity-activation 1-Lipschitz nets) |
+| **Methods (3)** | ours (flow score with bounded AMLS), Hashemi-clipping (axis-aligned pbox), and `n2v.nn.reach.reach_pytorch_model(method='approx')` as the sound deterministic baseline (Star-set bbox) |
+| **Sample-budget configs (3)** | small (m=1K), default (m=8K), large (m=16K) |
+| **K seeds** | 5 |
+| **Spec** | `unsat`: `y_0 ≥ 1e6` for synth_<N>d (UNSAT by 1-Lipschitz construction) and far halfspaces for the bananas. Falsifier OFF. |
+| **Outputs** | `exp3_<bench>_flow_unsat_ours_<config>.csv`, `exp3_<bench>_unsat_hashemi_clipping_<config>.csv`, `exp3_<bench>_unsat_starset_approx.csv` |
+| **Wall (full sweep)** | ~3-4 hours (synth_20d at m=16K is the long pole) |
+
+### Description
+
+Verdict statistics on far-away halfspace benchmarks compress two
+distinct properties of a predicted reach set into a single bit:
+*tightness* (how closely the predicted set wraps the true reach
+set) and *disjointness with the unsafe halfspace*. A loose predicted
+set can still prove disjointness with a far-away spec by 1D
+projection; the verdict alone tells the reader nothing about the
+geometric quality of the prediction.
+
+This experiment measures tightness directly. The volume ratio
+`vol(R_predicted) / vol(R_true)` quantifies how much each method
+over-approximates the true reach set; lower is tighter, 1.00 is
+exact, and the spread across methods is the geometric advantage
+that hides behind verdict-only comparisons.
+
+**Ground-truth volume.** For `synth_<N>d` (identity-activation
+1-Lipschitz nets), the reach set is the parallelotope image with
+volume `|det(W_total)| · prod(ub - lb)` — closed-form. For the two
+banana benchmarks (`RotatedBananaNet`, `ThreeBlobClassifier3D`) the
+reach set is non-convex; we use a cached N=10⁷ MC estimate via
+`exact_star_union_volume` (in `exact_volumes.py`).
+
+**Predicted-volume estimators.** Three methods are compared:
+
+- **Ours** (flow score with bounded AMLS): `R_q = {y : ‖φ⁻¹(y)‖ ≤ q}`
+  where `φ` is the calibrated flow. Volume estimated by Monte Carlo
+  on a bounding box of network outputs.
+- **Hashemi-clipping**: axis-aligned pbox volume = `prod(ub - lb)`,
+  closed-form. We additionally compute an MC sanity estimate by
+  sampling from a 1.1×-padded bbox; the closed form and MC agree
+  modulo MC noise.
+- **Starset-approx baseline** (`n2v.nn.reach.reach_pytorch_model
+  (method='approx')`): the sound deterministic over-approximation —
+  one Star polytope per output region, axis-aligned bbox of the
+  union. This is the natural sound-baseline comparator.
+
+**Sample-budget axis.** Three configs (`small` m=1K, `default`
+m=8K, `large` m=16K) per (benchmark, method) sweep over the
+calibration / MC budget. The axis controls how budget translates
+into tightness — a useful headline because sample-based methods
+trade compute for accuracy. 5 seeds per cell.
+
+**Specification.** All cells use `unsat`-type specs (far-away
+halfspaces, UNSAT by construction). Falsifier OFF. The verdict is
+not the metric here — the metric is the volume ratio.
+
+The figure is `paper/figures/fig5_exp3_volume_comparison.png` —
+volume ratio vs benchmark, log-y, one trace per (method, config).
+This experiment is what justifies the geometry-aware nonconformity
+score in the paper: it exposes a 2-7-order-of-magnitude gap that's
+invisible at the verdict level.
+
+---
+
+## Experiment 4 — Controlled scaling on 1-Lipschitz family
+
+| | |
+|---|---|
+| **Goal** | Demonstrate sub-exponential scaling of ours vs the exponential blow-up of sound verifiers on a controlled deep-MLP family. Headline plot: accuracy (% correctly solved) and mean wall-clock per instance vs network size. |
+| **Network family** | 7 spectrally-normalized ReLU MLPs with random Gaussian weights, **fixed width W=512**, depths `D ∈ {2, 4, 8, 16, 24, 32, 40}`. Param range **3.6K → 10M** (4 orders of magnitude). One network per depth. |
+| **Verification problems per network** | 10 per depth. Each instance: pick a random `x_0 ~ Uniform([-1, 1]^5)`; the input box is the L∞ ball `[x_0 ± 0.1]`; the spec is `y_0 ≥ empirical_max(y) + 0.1` — UNSAT by 1-Lipschitz construction. |
+| **Methods (4)** | ours (bounded AMLS), αβ-CROWN, NeuralSAT, Hashemi-clipping (m=8000) |
 | **Total runs** | 7 × 10 × 4 = **280** |
-| **Timeout** | 600s per (network, instance, method) |
-| **CSV outputs** | `exp4_scaling_ours.csv`, `exp4_scaling_alpha_beta_crown.csv`, `exp4_scaling_neuralsat.csv`, `exp4_scaling_hashemi_clipping.csv` |
-| **Aggregate** | `exp4_scaling_summary.csv` — one row per (depth, method) with median wall, p10/p90, TIMEOUT count, FALSE_UNSAT count |
-| **Wall** | ~12–16 hr (TIMEOUT-dominated for sound verifiers at D≥16) |
+| **Per-row timeout** | 300 s |
+| **Outputs** | `exp4_d<D>_<method>.csv` |
+| **Wall (full sweep)** | ~3-4 hours (αβ-CROWN dominates at high depth) |
 
-### Expected per-instance CSV schema (NEW)
-```
-depth, width, n_params, instance_idx, method, verdict, wall_s,
-timeout_s, x_0_seed, eps, spec_threshold, ground_truth,
-amls_bounded_eps_2_upper, amls_levels_used, error, timestamp
-```
+### Description
 
-`ground_truth = unsat` always (UNSAT-by-construction). A `verdict =
-UNSAT` is correct; `UNKNOWN` is honest abstention; `SAT` would be a
-soundness violation (should never occur for our method).
+VNN-COMP benchmarks vary multiple network properties at once
+(depth, width, activation, training regime, spec shape), so
+benchmark-to-benchmark differences in any verifier's wall-clock
+conflate algorithmic scaling with benchmark idiosyncrasy. This
+experiment isolates the *scaling* axis on a controlled synthetic
+family.
 
-### Aggregate CSV schema
-```
-depth, width, n_params, method,
-n_instances, n_unsat, n_unknown, n_sat, n_timeout, n_error,
-median_wall_s, p10_wall_s, p90_wall_s,
-n_false_unsat
-```
+**Network family.** Seven spectrally-normalised ReLU MLPs share a
+fixed width W=512 and identical Gaussian-initialised weight
+distributions; only depth varies (`D ∈ {2, 4, 8, 16, 24, 32, 40}`).
+The parameter count grows from ~3.6K to ~10M (4 orders of
+magnitude) while every other architectural choice is held constant.
+Each network is generated programmatically with a deterministic
+weight-init seed and exported to ONNX so αβ-CROWN and NeuralSAT can
+ingest it via their standard CLI.
 
-This is what the heatmap and scaling-curve figures consume.
+**Verification problems per network.** 10 instances per depth.
+Each instance picks a random `x_0 ∼ Uniform([-1, 1]^5)` (the input
+seeds are deterministic per `instance_idx`), defines an L∞ input box
+`[x_0 ± 0.1]`, and constructs the spec
+`y_0 ≥ empirical_max(y) + 0.1` where `empirical_max` is the maximum
+network output observed over a 100K-sample MC of the input box. The
+spec is **UNSAT by 1-Lipschitz construction** — a 1-Lipschitz net
+cannot exceed its empirical max by more than 0.1 + L · perturbation,
+which sits well below the threshold.
 
-### Implementation notes for Exp 4
-- Synthetic networks are generated programmatically with a deterministic
-  seed per `(depth, width)` and saved as ONNX so αβ-CROWN / NeuralSAT
-  can ingest them. The vnnlib spec files are also generated per
-  instance.
-- Network family file: `examples/FlowConformal/experiments/exp4_scaling/networks.py`.
-- Per-method runner pattern: `exp4_run_<method>.py --depth <D> --instance <idx>`.
+**Methods.** Four are run on every (depth, instance) cell:
+- **Ours** (bounded AMLS, mega config) — calibrates a flow on
+  100K MC samples of network outputs, then certifies via
+  `amls_bounded_certify_spec`.
+- **Hashemi-clipping** (m=8000) — axis-aligned pbox surrogate.
+- **αβ-CROWN** — invoked via subprocess into its own conda env, with
+  a config tuned for deep ReLU MLPs (`abcrown_exp4_deep_mlp.yaml`,
+  bs=1024, no PGD, input-split BaB, expandable_segments to mitigate
+  OOM).
+- **NeuralSAT** — invoked via subprocess into its own conda env.
+
+Per-instance shell timeout is 300s. Total runs: 7 × 10 × 4 = 280.
+
+The figure is `paper/figures/fig4_exp4_scaling.png`: two side-by-side
+panels — `% correctly solved` (left) and `mean wall-clock per
+instance` (right) — both as a function of network size in
+parameters. Cells where any instance hit the shell timeout are
+annotated with `N/M TO` on the wall-clock axis.
+
+This experiment is the paper's headline scaling story: with all
+non-depth axes held fixed, how does each method's verdict-rate and
+wall-clock scale as the network grows?
 
 ---
 
-## Ablation Studies
-
-| sweep | varying | range | wall |
-|---|---|---|---|
-| **Score function** | score family | naive flow / hyperrect / ellipsoid / GMM | combined with Exp 3 |
-| **Verification method** | verification primitive | scenario / amls (unbounded) / **amls_bounded** / scenario_v2 / IS / Langevin | ~3 hr |
-| **AMLS hyperparameters** | ρ, mcmc_steps | ρ ∈ {0.05, 0.1, 0.2}, mcmc ∈ {5, 10, 20, 40} | ~2 hr |
-| **Conformal parameters** | α, m, ell, β_2 | α ∈ {0.001, 0.01, 0.05, 0.1}, m ∈ {500, 2000, 8000}, β_2 ∈ {0.001, 0.01, 0.1}, ell offset {0, 1, 5} | ~2 hr |
-| **Flow training** | n_train, flow_epochs | n_train ∈ {1K, 2K, 5K, 10K, 20K, 50K}, flow_epochs ∈ {500, 1K, 2K, 5K} | ~3 hr |
+## Verification-method ablation
 
 | | |
 |---|---|
-| **Probe** | 10-instance ACAS Xu probe (4 persistent failures + 6 controls) |
-| **K seeds** | K=1 |
-| **CSV outputs** | `ablation_<sweep_tag>.csv` per sweep × value |
-| **Aggregate** | `ablation_summary.csv` |
-| **Wall** | ~10 hr total |
+| **Goal** | Justify the production choice of `verification_method='amls_bounded'` on Pareto-front grounds. With calibration held fixed per instance (shared `(flow, q)`), compare 5 verifiers on (a) UNSAT-recall on GT-UNSAT instances and (b) sound violations on GT-SAT instances. |
+| **Benchmarks (2)** | `acasxu_2023` (186 instances, 140 GT-UNSAT / 47 GT-SAT) and `tllverify_2023` (32 instances, 15 GT-UNSAT / 17 GT-SAT) |
+| **Methods (5)** | scenario, AMLS (unbounded), AMLS-bounded, IS-tilted, raw MC uniform |
+| **Setup** | `ablation_shared_flow.py` calibrates the flow ONCE per instance and runs all 5 verifiers against the same `(flow, q)`. This isolates verifier quality from flow-randomness contamination. |
+| **N instances** | full benchmarks (186 + 32 = 218 instances total) |
+| **Outputs** | `ablation_shared_flow_<benchmark>_<method>.csv` |
+| **Wall (full sweep)** | ~4 hours (acasxu_2023 dominates) |
 
-See [`CSV_SCHEMAS.md` §5](../CSV_SCHEMAS.md#5-ablation-suite).
+### Description
 
----
+The flow-conformal pipeline has two stages: (a) calibrate a flow on
+network outputs and pick a conformal threshold `q`, then (b) verify
+that the calibrated reach set `R_q = {y : ‖φ⁻¹(y)‖ ≤ q}` is disjoint
+from the unsafe halfspace. Stage (b) — the *verifier* — has multiple
+candidate algorithms in the literature, each with different
+soundness / recall / wall-clock trade-offs. This experiment is the
+controlled comparison that justifies our production choice.
 
-## Soundness Audit
+**The methodological pitfall this experiment avoids.** Naively
+running each verifier in its own end-to-end pipeline retrains the
+flow per (verifier, instance) pair, so cross-verifier differences
+conflate verifier quality with flow-randomness noise. Empirically,
+flow-randomness noise dominates verifier-quality noise on the
+ACAS Xu probe — without controlling for calibration, the ablation is
+uninterpretable.
 
-| | |
-|---|---|
-| **Goal** | Post-hoc sound verification of every UNSAT verdict from any method by AutoAttack + 5K-restart PGD on the original network. Catches false UNSATs that VNN-COMP ground truth might also have missed. |
-| **Scope** | every UNSAT row from Exp 1, Exp 2, Phase 5e ACAS Xu, and Exp 4 |
-| **Tools** | AutoAttack ([fra31/auto-attack](https://github.com/fra31/auto-attack), parameter-free APGD-CE + APGD-T + FAB-T + Square ensemble) and 5000-restart PGD with 100 steps |
-| **Prerequisite** | AutoAttack: `pip install git+https://github.com/fra31/auto-attack.git`; timm: ✅ already installed |
-| **CSV output** | `soundness_audit.csv` |
-| **Wall** | ~3–5 hr |
+**Shared calibration setup.** The runner
+[`ablation_shared_flow.py`](exp_ablation/ablation_shared_flow.py)
+calibrates `(flow, q)` ONCE per (instance, input-region box) and
+runs all candidate verifiers against the *same* tuple. Verifier
+quality is then the only varying axis. Implementation detail: the
+`_calibrate_flow_for_spec` and `_verify_with_calibration` helpers
+in `n2v/probabilistic/verify_flow.py` factor the canonical
+`run_verification_pipeline` into a calibration stage and a
+verifier-dispatch stage exactly to support this.
 
-Per-row schema:
-```
-benchmark, instance, method, claimed_verdict,
-audit_method, audit_verdict, witness_x, witness_y,
-audit_wall_s, audit_n_restarts, audit_pgd_steps
-```
+**Five candidate verifiers.**
 
-`audit_verdict = sat` on a row where `claimed_verdict = UNSAT` flags
-a false UNSAT. We expect 0 such rows for ours; up to ~25-28% for
-Hashemi-clipping at small `m` per probe v2.
+- **Scenario** — truncated-Gaussian Monte Carlo on `‖z‖ ≤ q` with
+  Campi-Garatti scenario optimisation (the Phase 5b production
+  default).
+- **AMLS (unbounded)** — adaptive multi-level splitting with a full
+  Gaussian-prior MCMC, asymptotic CI bound. The Phase 5d default.
+- **AMLS-bounded** — the same level-splitting MCMC restricted to
+  `‖z‖ ≤ q` so the rare-event search domain matches the conformal
+  coverage region exactly. The Phase 5e production default and the
+  candidate this experiment validates.
+- **IS-tilted** — importance sampling with a flow-tilted proposal
+  (alternative paradigm to MCMC).
+- **Raw MC uniform** — uniform Monte Carlo on `‖z‖ ≤ q` with
+  Clopper-Pearson upper bound. Brute-force baseline that demonstrates
+  what's lost without rare-event estimation.
 
----
+**Two benchmarks** are chosen to expose complementary failure modes:
 
-## Execution order (priority hierarchy)
+- `acasxu_2023` (full 186 instances, 140 GT-UNSAT / 47 GT-SAT) —
+  reach-set boundary close to the conformal-coverage limit;
+  exposes scenario / IS's boundary-tail miss failure mode where i.i.d.
+  sampling fails to find unsafe witnesses near `‖z‖ = q`.
+- `tllverify_2023` (full 32 instances, 15 GT-UNSAT / 17 GT-SAT) —
+  reach-set support is genuinely disjoint from unsafe but the
+  flow assigns small tail mass outside the calibrated ball;
+  exposes unbounded AMLS's spurious-positive failure mode where
+  level-splitting MCMC drifts past `‖z‖ ≤ q` and finds unsafe
+  witnesses *outside* the conformal coverage region.
 
-Running everything sequentially. Earlier items have higher priority —
-if compute time runs out before reaching the lower items, the paper
-remains coherent.
-
-| order | what | wall | rationale |
-|---:|---|---:|---|
-| **1** | **Exp 1** — ours + Hashemi-clipping + SaVer on the 7 benchmarks (21 cells) | ~10-12 hr | core soundness story; all paper headline numbers come from here. SaVer (Tier-B) added so every Exp 1 row carries a probabilistic-baseline column. |
-| **2** | **Exp 2 Tier-A** — ours + Hashemi-clipping + αβ-CROWN on the 4 benchmarks | ~17 hr | scaling story for probabilistic methods (RS moved to phase 5) |
-| **3** | **Exp 3** — ours (4 score families) + Hashemi on synthetic | ~8 hr | geometry advantage |
-| **4** | **Exp 4** — ours + αβ-CROWN + NeuralSAT + Hashemi-clipping on 7 synthetic networks | ~14 hr | controlled scaling |
-| **5** | **Exp 2 RS** — Cohen randomized smoothing on cifar10_resnet110 + cifar100_2024 | ~5 hr | smoothing-baseline comparison on image classification only |
-| **6** | **Soundness audit** — AutoAttack + PGD on every UNSAT verdict | ~4 hr | independent verification of paper claims |
-| **7** | **Ablation studies** — verification method (incl. amls_bounded / amls_bounded_union vs scenario / amls / is_tilted / derived), AMLS hp, conformal hp, flow training, score family | ~7-8 hr | one-knob-at-a-time motivations |
-| **8** | **Exp 2 Tier-B** — ProbStar + SaVer on the 4 benchmarks | ~8-12 hr | additional probabilistic-baseline comparison; ProbStar uniformly emits NOT_APPLICABLE on Exp 2 (StarV's loader rejects transformer attention, residual `Add`, and `Gemm` nodes — all 4 networks hit one of these limitations). The runner records the NOT_APPLICABLE rows to substantiate the gap claim. |
-
-**Cumulative wall (sequential):** Exp 1 → Exp 4 inclusive ~ 49 hr · everything ~ 75-95 hr · with overnight scheduling, **~7-9 calendar days of experiment compute**.
-
-### Things to do before starting
-
-#### Implementation work
-
-| item | status |
-|---|---|
-| ✅ Bounded AMLS implementation + `verification_method='amls_bounded'` plumbing | done |
-| ✅ Loader audits (no bugs; wrappers match ONNX Runtime) | done |
-| ✅ Lock-in probe for Exp 1/2 configs (locked offline; canonical hparams now committed in each benchmark's `_benchmarks.py:PER_BENCHMARK_CONFIG`) | done — original 5 Exp 1 benchmarks plus vit_2023, cifar100_2024, metaroom_2023, tinyimagenet_2024 all locked at mega + amls_bounded_union where appropriate. |
-| ✅ acasxu_sweep.py refactored to SEED=47 + `--vnncomp-timeouts` + `--smoke` | done — smoke run gives UNSAT on (1,1)+prop_1 in 52.2s (under 116s VNN-COMP budget) |
-| ✅ Union-AMLS implementation (`amls_bounded_estimate_union_mass`, `amls_bounded_certify_spec_union`, `verification_method='amls_bounded_union'`) | done — 10 unit tests pass |
-| ✅ `amls_max_levels` override threads through `run_verification_pipeline` | done — verified with `test_max_levels_caps_union_loop` |
-| ⏳ ACAS Xu sweep rerun under SEED=47 (replaces Phase 5e CSV; feeds Exp 1's ACAS Xu row) | pending — ~3 hr |
-| ✅ Exp 4 synthetic-network family + 4 per-(depth, tool) runners | done — `experiments/exp4_scaling/` with `_benchmarks.py`, `instance_generator.py`, `networks.py`, and 4 runners (ours, hashemi_clipping, alpha_beta_crown, neuralsat) |
-| ✅ Per-(experiment, tool) runner scripts | done — 15 runners total (Exp 1 × 3 [ours + hashemi + saver], Exp 2 × 5 [ours + hashemi + αβ-CROWN + RS + probstar], Exp 3 × 2 [ours + hashemi], Exp 4 × 4 [ours + hashemi + αβ-CROWN + neuralsat], plus standalone `baselines/run_probstar.py` for the starv conda env) all exposing `--list-instances` / `--instance-idx` / `--write-timeout-row` for `run_cell.sh` |
-
-#### Tool installations (verify before any experiment runs)
-
-Each tool needs an importable / runnable smoke test against a tiny
-ACAS Xu instance (or a generated tiny MLP for AutoAttack/RS) before we
-commit any compute to a full benchmark sweep. Smoke tests are written
-into the per-tool runner script so a `--smoke` flag exercises the path
-end-to-end on a 1-instance run.
-
-| tool | install / location | smoke test | status |
-|---|---|---|---|
-| **αβ-CROWN** | clone at `~/v/other/alpha-beta-CROWN` | run `complete_verifier/abcrown.py --config <tiny>.yaml` on `acasxu_2023/onnx/ACASXU_run2a_1_1.onnx + prop_3.vnnlib` | ⏳ install verify + smoke |
-| **NeuralSAT** | clone at `~/v/other/neuralsat` | run NeuralSAT's CLI on the same ACAS Xu (1,1) instance | ⏳ install verify + smoke |
-| **timm** | `pip install timm` | `import timm; timm.create_model('resnet50')` | ✅ installed |
-| **AutoAttack** | `pip install git+https://github.com/fra31/auto-attack.git` (Croce & Hein 2020 — APGD-CE + APGD-T + FAB-T + Square ensemble) | run `AutoAttack(model, norm='Linf', eps=0.1).run_standard_evaluation(x, y)` on a 2-layer MLP | ⏳ install + smoke |
-| **PGD-5K-restart** | local — no install (custom loop in `n2v.utils.falsify`) | already in `falsify.py`; smoke is just unit tests | ✅ in repo |
-| **Gurobi WLS license** | env var `GRB_LICENSE_FILE` | `python -c 'import gurobipy as gp; gp.Model()'` | ✅ done (per prior session) |
-| **ProbStar** | dispatched via subprocess into the `starv` conda env (`baselines/run_probstar.py` standalone) | exp2_run_probstar `--smoke` on cifar100_2024 → NOT_APPLICABLE (StarV's loader rejects residual Add — expected) | ✅ smoke (NOT_APPLICABLE on every Exp 2 net) |
-| **SAVER** | runs **in-process inside the n2v env** (no separate conda env; `baselines/run_saver.py` adds `~/v/other/SaVer-Toolbox` to `sys.path`) | exp1_run_saver `--smoke` on dist_shift_2023 / metaroom_2023 → UNKNOWN | ✅ smoke |
-| **Cohen RS** | pretrained weights present | `torch.load(<rs_ckpt>)` and run `Smooth.certify` on 1 image | ✅ weights downloaded (per prior session) |
-
-Each per-tool runner script (`expN_run_<benchmark>_<method>.py`)
-includes a `--smoke` flag that runs *one* tiny instance and asserts
-the verdict matches a hand-checked expected value. CI / pre-flight is:
-run every script with `--smoke`, ensure all pass, only then start the
-full sweeps.
+The table is `paper/tables/tab5_shared_flow_ablation.tex` — five
+method rows × four metric columns (UNSAT-recall and sound violations
+per benchmark). Bolding marks the per-column best. The experiment
+demonstrates the Pareto-front argument for `amls_bounded`: it's the
+only verifier that's best-or-tied on every column.
 
 ---
 
-## Per-experiment script call convention
+## Execution order
 
-**One script = one `(experiment, tool)` sweep, parameterised by `--benchmark`.**
-Each runner script accepts a benchmark CLI argument and runs the entire
-benchmark when called. Per-benchmark hparam overrides (config name,
-`max_levels`, `verification_method`, etc.) live in a hardcoded
-`PER_BENCHMARK_CONFIG` dict at the top of the runner. Loader logic is
-factored into a per-experiment `_benchmarks.py` helper module so each
-runner stays small.
+The single canonical launcher
+[`run_paper_sweeps.sh`](run_paper_sweeps.sh) accepts a `--phase` flag
+that maps 1-to-1 to the experiments above:
 
-```
-expN_run_<method>.py --benchmark <name> [--output-csv <path>] [--smoke]
-```
-
-For example:
 ```bash
-# Exp 1, ours on collins_rul_cnn (full sweep)
-PYTHONPATH=. python examples/FlowConformal/experiments/exp1_vnncomp_subset/exp1_run_ours.py \
-  --benchmark collins_rul_cnn_2022
-# Exp 1, Hashemi-clipping on dist_shift
-PYTHONPATH=. python examples/FlowConformal/experiments/exp1_vnncomp_subset/exp1_run_hashemi_clipping.py \
-  --benchmark dist_shift_2023
-# Exp 2, αβ-CROWN on cifar100
-PYTHONPATH=. python examples/FlowConformal/experiments/exp2_prob_scale/exp2_run_alpha_beta_crown.py \
-  --benchmark cifar100_2024
-# Exp 4, NeuralSAT — depth selects the synthetic network
-PYTHONPATH=. python examples/FlowConformal/experiments/exp4_scaling/exp4_run_neuralsat.py --depth 16
-# Smoke (run 1 instance, assert hand-checked verdict)
-PYTHONPATH=. python examples/FlowConformal/experiments/exp1_vnncomp_subset/exp1_run_ours.py \
-  --benchmark vit_2023 --smoke
+bash run_paper_sweeps.sh --phase exp1     # ~2-3 hr
+bash run_paper_sweeps.sh --phase exp2     # ~3-4 hr
+bash run_paper_sweeps.sh --phase exp3     # ~3-4 hr
+bash run_paper_sweeps.sh --phase exp4     # ~3-4 hr
+bash run_paper_sweeps.sh --phase ablation # ~4 hr
+bash run_paper_sweeps.sh --phase all      # all of the above sequentially, ~15-20 hr
 ```
 
-Each runner script:
-1. Loads `PER_BENCHMARK_CONFIG[benchmark]` for hparam overrides
-   (config name, `max_levels`, `verification_method`, etc.).
-2. Calls the experiment's `_benchmarks.load_instances(benchmark)` helper
-   to get the instance list and per-instance loader.
-3. For each instance, resets `torch.manual_seed(SEED)` / `np.random.seed(SEED)` with `SEED=47`.
-4. Calls the tool's verifier with `seed=SEED`.
-5. Honours per-row VNN-COMP timeout for Exp 1/2 or the configured Exp 4 timeout.
-6. Writes one CSV row per instance to `experiments/<exp_dir>/outputs/<filename>.csv`.
+Each cell is guarded by a `--force`-able no-overwrite check (the
+launcher aborts an individual cell if its output CSV already exists,
+preserving the data on disk). Use `--smoke` for a 1-instance sanity
+pass per cell (~30-60 min total, hard-capped at 10 min per cell).
 
-The `--smoke` flag runs only the first instance and asserts a
-hand-checked expected verdict (e.g. for ACAS Xu (1,1)+prop_1: UNSAT;
-for cifar100: matches αβ-CROWN VNN-COMP ground truth). All scripts
-must pass `--smoke` before any full sweep is launched.
+---
 
-For long-running sweeps, prefer launching via `nohup` with `-u` so
-output is line-buffered:
+## Per-experiment runner convention
+
+Every runner accepts:
+
+```
+expN_run_<method>.py --benchmark <name> [--smoke]
+                     [--instance-idx <k>] [--list-instances]
+                     [--write-timeout-row] [--output-csv <path>]
+```
+
+`run_cell.sh` uses `--list-instances` + `--instance-idx` to drive
+per-instance shell timeouts (so a single hung instance never sinks
+the rest of the cell). All Exp 1 / Exp 2 / Exp 4 runners support
+this; Exp 3 and the ablation runner manage their own instance loops
+in-process.
+
+For long-running sweeps:
+
 ```bash
-PYTHONPATH=. nohup python -u examples/FlowConformal/experiments/<exp>/<script>.py \
-  --benchmark <name> > examples/FlowConformal/experiments/<exp>/outputs/<log>.log 2>&1 &
+nohup bash examples/FlowConformal/experiments/run_paper_sweeps.sh \
+    --phase exp4 \
+    > /tmp/exp4.log 2>&1 &
 ```
-
-### Old prototype outputs
-
-The CSVs currently sitting in `experiments/exp{1,2,3,_ablation}/outputs/`
-are all `_smoke`-suffixed prototype runs from earlier figure-prototyping
-work (~200 B–30 KB each). They are **safe to delete** — real experiment
-runs use the canonical filenames (no `_smoke` suffix) per
-`exp<N>_<benchmark>_<method>.csv` and will not collide.
-
-`experiments/exp4_scaling/` does not exist yet; it will be created when
-the synthetic-network family and Exp 4 runners are built.

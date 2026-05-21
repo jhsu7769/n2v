@@ -39,7 +39,7 @@ EXP4_METHODS = ("alpha_beta_crown", "neuralsat", "hashemi_clipping", "ours")
 # scoped to fig4 instead of touching ``METHOD_DISPLAY`` in
 # ``_common.py``, which other figures still read.
 LEGEND_LABEL_OVERRIDES: dict[str, str] = {
-    "hashemi_clipping": "CLIP",
+    "hashemi_clipping": "Clipping-Block",
     "ours":             "Ours",
 }
 
