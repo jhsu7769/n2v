@@ -12,6 +12,7 @@ torchdiffeq>=0.2.3 # required by FlowODE / log-det scores
 # Optional: For examples
 matplotlib>=3.3.0
 torchvision>=0.15.0
+scikit-learn>=1.0.0  # GMMScore (n2v.probabilistic.flow) + exp3 score baselines
 
 # Optional: For Jupyter notebooks
 jupyter>=1.0.0
