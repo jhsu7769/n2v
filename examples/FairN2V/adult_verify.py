@@ -17,41 +17,43 @@ import numpy as np
 import torch
 
 from n2v.sets import Star, HalfSpace
-from n2v.nn import NeuralNetwork
-from n2v.utils.model_loader import load_onnx
-from n2v.utils.model_preprocessing import strip_final_softmax
 from n2v.utils.verify_specification import verify_specification
 
-def perturbationIF(x, epsilon, min_values, max_values):
-    """Apply perturbation (individual fairness) to sample.
+from adapter import LOADERS
+
+
+def perturbation_box(x, epsilon, perturbable_features):
+    """Build the input Star: an epsilon-box around a (already counterfactual) sample.
+
+    The sensitive attribute is expected to be ALREADY set by the caller via
+    adapter.counterfactuals(); this function only widens the perturbable
+    numerical features by +/- epsilon and clamps to the valid feature domain.
+
+    The data is min-max normalized upstream, so every feature lives in [0, 1];
+    that -- not the raw per-feature min/max -- is the correct clamp domain.
+    (Clamping normalized values against raw bounds can invert lb/ub when a
+    feature's raw range is not exactly [0, 1].)
 
     Args:
-        x:          1-D feature vector, shape (n,)
-        epsilon:    perturbation radius (0.0 -> counterfactual fairness;
-                    -1 -> sentinel: return the original sample unperturbed)
-        min_values: per-feature lower clamp, shape (n,)
-        max_values: per-feature upper clamp, shape (n,)
+        x:          1-D feature vector, shape (n,) -- the counterfactual sample
+        epsilon:    perturbation radius (0.0 -> counterfactual fairness, no widening;
+                    >0.0 -> individual fairness, widen numerical features)
+        perturbable_features: numerical columns epsilon is allowed to move
 
     Returns:
         Star: the input set (box) for reachability
     """
 
-    x = np.array(x, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
 
     disturbance = np.zeros_like(x)
-    sensitive_rows = [8]
-    nonsensitive_rows = [0, 9, 10, 11]
-
-    if epsilon != -1:
-        # Flip the sensitive attribute
-        x[sensitive_rows] = 1.0 - x[sensitive_rows]
-
+    if epsilon > 0:
         # Apply epsilon perturbation to the non-sensitive numerical features
-        disturbance[nonsensitive_rows] = epsilon
+        disturbance[perturbable_features] = epsilon
 
-    # Calculate disturbed lower and upper bounds considering min and max values
-    lb = np.maximum(x - disturbance, min_values)
-    ub = np.minimum(x + disturbance, max_values)
+    # Clamp to the normalized feature domain [0, 1]
+    lb = np.clip(x - disturbance, 0.0, 1.0)
+    ub = np.clip(x + disturbance, 0.0, 1.0)
 
     # float32 at the boundary to match ONNX models' input dtype
     lb = lb.reshape(-1, 1).astype(np.float32)
@@ -116,12 +118,6 @@ def main(config=None):
     model_dir = config['models_dir']
     onnx_files = sorted(model_dir.glob('*.onnx'))
 
-    # Load data
-    data_file_path = config['data_dir'] / config['data_file']
-    data = np.load(data_file_path)
-    X = data['X']
-    y = data['y']
-
     # Create results directory if it doesn't exist
     config['output_dir'].mkdir(parents=True, exist_ok=True)
 
@@ -140,8 +136,14 @@ def main(config=None):
     epsilon_individual = config['epsilon_individual']
     epsilon = epsilon_counterfactual + epsilon_individual  # Combined for processing
 
-    # Number of observations to test
-    num_obs = config['num_obs']
+    # Number of observations to test. If an explicit `sample_indices` list is
+    # given (e.g. to match another tool's exact sample set), it overrides both
+    # num_obs and the random selection below.
+    sample_indices = config.get('sample_indices')
+    num_obs = len(sample_indices) if sample_indices is not None else config['num_obs']
+
+    # Pick the dataset adapter loader (default: adult, so existing runs are unchanged)
+    loader = LOADERS[config.get('dataset', 'adult')]
 
     ## Loop through each model
     for onnx_path in onnx_files:
@@ -149,26 +151,12 @@ def main(config=None):
         if model_name not in model_list:
             continue
 
-        # Load the ONNX file and wrap it for verification
-        netONNX = load_onnx(onnx_path)
-        # Drop the trailing softmax so Star reachability can run on the logits
-        netONNX = strip_final_softmax(netONNX)
-        net = NeuralNetwork(netONNX)
-
-        X_test_loaded = X.T
-        y_test_loaded = y[:, 0].astype(int)
-
-        # Normalize features in X_test_loaded
-        min_values = X_test_loaded.min(axis=1)
-        max_values = X_test_loaded.max(axis=1)
-
-        # Ensure no division by zero for constant features
-        variable_features = max_values - min_values > 0
-        min_values[~variable_features] = 0.0  # avoids changing constant features
-        max_values[~variable_features] = 1.0  # avoids division by zero
-
-        # Normalizing X_test_loaded
-        X_test_loaded = (X_test_loaded - min_values[:, None]) / (max_values - min_values)[:, None]
+        # Build the dataset adapter: loads + normalizes data and wraps the model.
+        # Everything dataset-specific now lives behind this single call.
+        adapter = loader(config['data_dir'], onnx_path, config['data_file'])
+        net = adapter.net
+        X_test_loaded = adapter.X
+        y_test_loaded = adapter.y
 
         # Count total observations
         total_obs = X_test_loaded.shape[1]
@@ -179,7 +167,8 @@ def main(config=None):
             x_sample = X_test_loaded[:, i] # shape (13,)
             x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1) # shape (1, 13)
             predicted_labels = net.forward(x_t) # same as evaluate; returns output in (1,2) tensor
-            pred = int(predicted_labels.argmin()) # index of smaller value, which is the predicted label
+            # class_type 'min' -> predicted class is the smaller logit (argmin)
+            pred = int(predicted_labels.argmin()) if adapter.class_type == 'min' else int(predicted_labels.argmax())
             true_label = y_test_loaded[i]
             if pred == true_label:
                 total_corr += 1
@@ -198,9 +187,12 @@ def main(config=None):
         # met (per-cell method tag) -- unused downstream, so omitted:
         # met = np.full((num_obs, nE), "exact", dtype=object) # method used to compute result
 
-        # Randomly select observations
-        rng = np.random.default_rng(config['random_seed']) # set a seed for reproducibility
-        rand_indices = rng.choice(total_obs, size=num_obs, replace=False)
+        # Select observations: explicit indices (to match an external tool) or random
+        if sample_indices is not None:
+            rand_indices = np.asarray(sample_indices, dtype=int)
+        else:
+            rng = np.random.default_rng(config['random_seed']) # set a seed for reproducibility
+            rand_indices = rng.choice(total_obs, size=num_obs, replace=False)
 
         for e in range(nE):
             # Start the timer
@@ -208,25 +200,27 @@ def main(config=None):
 
             for i in range(num_obs):
                 idx = rand_indices[i]
-                IS = perturbationIF(X_test_loaded[:, idx], epsilon[e], min_values, max_values)
-
-                t = time.time() # start timing the verification for each sample
-                output_set = net.reach(IS, method=reach_method) # generate output set
+                x_sample = X_test_loaded[:, idx]
                 target = y_test_loaded[idx]
 
-                # Process set
-                R = output_set
+                t = time.time() # start timing the verification for each sample
 
-                # Process fairness specification
-                spec = robustness_set(target, R[0].dim, 'min')
+                # The sample is fair only if the prediction is preserved across
+                # EVERY counterfactual of the sensitive attribute (one for binary,
+                # k-1 for a k-category one-hot attribute).
+                is_robust = 1
+                for cf in adapter.counterfactuals(x_sample):
+                    IS = perturbation_box(cf, epsilon[e], adapter.perturbable_features)
+                    R = net.reach(IS, method=reach_method) # generate output set
 
-                # Verify fairness: per-sample flag, 1 = all reach sets satisfy
-                # the spec, 0 = at least one violates
-                result = verify_specification(R, spec)
-                if result.verdict == 'UNSAT':
-                    is_robust = 1
-                else:
-                    is_robust = 0
+                    # Process fairness specification
+                    spec = robustness_set(target, R[0].dim, adapter.class_type)
+
+                    # one counterfactual violating the spec is enough to mark unfair
+                    result = verify_specification(R, spec)
+                    if result.verdict != 'UNSAT':
+                        is_robust = 0
+                        break
 
                 # met[i,e] = 'exact' (met isn't used anywhere, so this is commented out for now)
                 res[i, e] = is_robust
