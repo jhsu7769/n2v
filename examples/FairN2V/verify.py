@@ -1,5 +1,7 @@
 """
-Exact Fairness Verification of Adult Classification Model (NN)
+Exact Fairness Verification of a fairness classifier (NN), dataset-agnostic.
+The dataset (and thus its model, data, and fairness declaration) is selected
+via config['dataset'] / the DatasetAdapter loader registry in adapter.py.
 Generates results for: (1) Counterfactual fairness table
                        (2) Individual fairness stacked bar charts
                        (3) Comprehensive timing table
@@ -161,12 +163,19 @@ def main(config=None):
         # Count total observations
         total_obs = X_test_loaded.shape[1]
 
+        # Cap requested sample count to what the dataset actually has (German has
+        # 150 rows vs Adult's 9769); explicit sample_indices are respected as-is.
+        if sample_indices is None and num_obs > total_obs:
+            print(f"Requested num_obs={num_obs} exceeds dataset size {total_obs}; "
+                  f"using {total_obs}.")
+            num_obs = total_obs
+
         # Test accuracy --> verify matches with python
         total_corr = 0
         for i in range(total_obs):
-            x_sample = X_test_loaded[:, i] # shape (13,)
-            x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1) # shape (1, 13)
-            predicted_labels = net.forward(x_t) # same as evaluate; returns output in (1,2) tensor
+            x_sample = X_test_loaded[:, i] # shape (n_features,)
+            x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1) # shape (1, n_features)
+            predicted_labels = net.forward(x_t) # same as evaluate; returns output in (1, n_classes) tensor
             # class_type 'min' -> predicted class is the smaller logit (argmin)
             pred = int(predicted_labels.argmin()) if adapter.class_type == 'min' else int(predicted_labels.argmax())
             true_label = y_test_loaded[i]

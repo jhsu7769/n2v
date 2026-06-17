@@ -155,8 +155,72 @@ def load_adult(data_dir, model_path, data_file='adult_data.npz'):
     )
 
 
+def load_adult_debiased(data_dir, model_path, data_file='adult_data.npz'):
+    """Adult-Income (UCI), debiased models. Same data + fairness declaration as
+    load_adult (sensitive column 8); only the verified networks differ -- these
+    are the fairness-trained ACD-* models, the debiased half of the paper's
+    biased-vs-debiased comparison. Ported from adult_debiased_verify.m.
+    """
+    return _load_npz_adapter(
+        'adult_debiased', data_dir, model_path, data_file,
+        sensitive_features=[8],
+        perturbable_features=[0, 9, 10, 11],
+        sensitive_encoding='binary',
+        output_size=2,
+        class_type='min',
+    )
+
+
+def load_german(data_dir, model_path, data_file='german_data.npz'):
+    """German Credit. Sensitive attribute: sex/marital status (binary, column 19).
+
+    Indices ported from german_verify.m (1-indexed -> 0-indexed):
+    sensitive [20]->[19]; perturbable [2,5,8,10,12,15,16]->[1,4,7,9,11,14,15].
+    """
+    return _load_npz_adapter(
+        'german', data_dir, model_path, data_file,
+        sensitive_features=[19],
+        perturbable_features=[1, 4, 7, 9, 11, 14, 15],
+        sensitive_encoding='binary',
+        output_size=2,
+        class_type='min',
+    )
+
+
+def load_bank(data_dir, model_path, data_file='bank_data.npz'):
+    """Bank Marketing (UCI). Sensitive attribute: age (binary, column 0).
+
+    Indices ported from bank_verify.m (1-indexed -> 0-indexed):
+    sensitive [1]->[0]; perturbable [6,12,13,14,15]->[5,11,12,13,14].
+    """
+    return _load_npz_adapter(
+        'bank', data_dir, model_path, data_file,
+        sensitive_features=[0],
+        perturbable_features=[5, 11, 12, 13, 14],
+        sensitive_encoding='binary',
+        output_size=2,
+        class_type='min',
+    )
+
+
 # Registry: dataset key -> loader. The verification driver picks one via
 # config['dataset'], so adding a dataset = write a loader + add one line here.
 LOADERS = {
     'adult': load_adult,
+    'adult_debiased': load_adult_debiased,
+    'german': load_german,
+    'bank': load_bank,
+}
+
+
+# Run profiles: the per-dataset "how to run it" companion to LOADERS' "what it
+# is". The runner selects one via config['dataset'] / --dataset to fill in the
+# data file and which models to verify. Adding a dataset = one LOADERS entry +
+# one RUN_PROFILES entry. (data_file repeats the loader's own default on
+# purpose, so the runner can check the file exists before loading anything.)
+RUN_PROFILES = {
+    'adult':          {'data_file': 'adult_data.npz',  'model_list': ['AC-1', 'AC-3', 'AC-4']},
+    'adult_debiased': {'data_file': 'adult_data.npz',  'model_list': ['ACD-1', 'ACD-3', 'ACD-4']},
+    'german':         {'data_file': 'german_data.npz', 'model_list': ['GC-1', 'GC-2', 'GC-3']},
+    'bank':           {'data_file': 'bank_data.npz',   'model_list': ['BM-5', 'BM-6', 'BM-7']},
 }

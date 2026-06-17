@@ -47,7 +47,7 @@ def main(config=None):
         subdirs = [d for d in results_root.iterdir() if d.is_dir()]
         if not subdirs:
             raise FileNotFoundError(
-                f"No results subdir found under {results_root}. Run adult_verify.py first.")
+                f"No results subdir found under {results_root}. Run verify.py first.")
         config = {
             'output_dir': max(subdirs, key=lambda d: d.stat().st_mtime),
             'save_png': True,
@@ -64,7 +64,7 @@ def main(config=None):
     # Check if files exist
     if not counterfactual_files or not individual_files or not timing_files:
         raise FileNotFoundError(
-            f"CSV files not found in {results_dir}. Please run adult_verify.py first.")
+            f"CSV files not found in {results_dir}. Please run verify.py first.")
 
     # Get the most recent file of each family (sorted by modification time)
     csv_counterfactual = max(counterfactual_files, key=lambda p: p.stat().st_mtime)
@@ -94,13 +94,23 @@ def main(config=None):
     # Get unique models
     models = sorted(individual_data['Model'].unique())
 
-    # Model display names (fuller titles for figures/tables)
-    # Based on actual architectures:
-    # AC-1: 13→16→8→2 (~350 params) - Small
-    # AC-3: 13→50→2 (~750 params) - Medium
+    # Model display names (fuller titles for figures/tables), one per model
+    # across every dataset profile. Models not listed fall back to their raw id.
+    # Adult sizes (Small/Medium/Large) follow the architectures in the README;
+    # ACD-* are the debiased counterparts of the same-numbered AC-* nets.
     model_display_names = {
         'AC-1': 'Adult Census - Small Model',
         'AC-3': 'Adult Census - Medium Model',
+        'AC-4': 'Adult Census - Large Model',
+        'ACD-1': 'Adult Census (Debiased) - Small Model',
+        'ACD-3': 'Adult Census (Debiased) - Medium Model',
+        'ACD-4': 'Adult Census (Debiased) - Large Model',
+        'GC-1': 'German Credit - Model 1',
+        'GC-2': 'German Credit - Model 2',
+        'GC-3': 'German Credit - Model 3',
+        'BM-5': 'Bank Marketing - Model 5',
+        'BM-6': 'Bank Marketing - Model 6',
+        'BM-7': 'Bank Marketing - Model 7',
     }
 
     ## LaTeX Table 1: Counterfactual Fairness (with timing)
@@ -173,8 +183,9 @@ def main(config=None):
         unfair_pct = model_data['UnfairPercent'].values
         n_eps = len(epsilons)
 
-        # Use discrete x positions
-        x = np.arange(n_eps)
+        # Position points at their true epsilon values (proportional x-axis),
+        # so horizontal gaps reflect the real perturbation-size differences.
+        x = np.asarray(epsilons, dtype=float)
 
         # Stacked area layers (bottom to top: fair, then unfair)
         y1 = fair_pct         # Bottom layer: Fair
@@ -199,14 +210,15 @@ def main(config=None):
         display_title = model_display_names.get(model_name, model_name)
         ax.set_title(display_title, fontweight='bold', fontsize=14)
 
-        # Set x-axis with epsilon labels
+        # Tick at each true epsilon value
         ax.set_xticks(x)
         eps_labels = [f'{e:.2f}' for e in epsilons]
         ax.set_xticklabels(eps_labels)
 
-        # Axis limits
+        # Axis limits: small proportional padding so end points aren't on the spines
         ax.set_ylim(0, 100)
-        ax.set_xlim(-0.3, n_eps - 0.7)
+        pad = (x.max() - x.min()) * 0.03 if x.max() > x.min() else 0.01
+        ax.set_xlim(x.min() - pad, x.max() + pad)
 
         # Professional grid styling
         ax.grid(True, linestyle='--', alpha=0.3)

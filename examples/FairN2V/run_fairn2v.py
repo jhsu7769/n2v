@@ -1,10 +1,13 @@
 """
 FairN2V - Main Runner Script
-Runs the complete FairN2V verification pipeline on the Adult-Income
-classifier (counterfactual + individual fairness).
+Runs the complete FairN2V verification pipeline (counterfactual + individual
+fairness) on a dataset selected via --dataset (default: adult).
 
 USAGE:
-  python run_fairn2v.py
+  python run_fairn2v.py                          # Adult (default)
+  python run_fairn2v.py --dataset adult_debiased
+  python run_fairn2v.py --dataset german
+  python run_fairn2v.py --dataset bank
 
 OUTPUTS (under FairN2V/results/<timestamp>/):
   - CSV files with verification results
@@ -13,23 +16,42 @@ OUTPUTS (under FairN2V/results/<timestamp>/):
 
 REQUIREMENTS:
   - n2v toolbox installed (import n2v)
-  - ONNX models in FairN2V/models/ (AC-1.onnx, AC-3.onnx)
-  - adult_data.npz in FairN2V/data/
+  - the chosen dataset's ONNX models in FairN2V/models/ and .npz in
+    FairN2V/data/ (named by its adapter.RUN_PROFILES entry)
 """
 
+import argparse
 import datetime
 import warnings
 from pathlib import Path
 
 import n2v
-import adult_verify
+import verify
 import plot_results
+
+from adapter import RUN_PROFILES
 
 ## ================== CONFIGURATION ==================
 # Defaults below are applied only for fields the caller has not already
-# set in a pre-populated `config` struct (e.g., from run_all.sh --smoke)
+# set in a pre-populated `config` struct (e.g., an external smoke wrapper).
 if 'config' not in locals():
     config = {}
+    # CLI parsing happens only on the normal entry path; a caller that
+    # pre-populates `config` (and exec's this file) skips it, leaving argv free.
+    parser = argparse.ArgumentParser(
+        description='Run the FairN2V fairness-verification pipeline on a dataset.')
+    parser.add_argument('--dataset', default='adult', choices=list(RUN_PROFILES),
+                        help='Dataset profile to verify (default: adult).')
+    parser.add_argument('--num-obs', type=int, default=None,
+                        help='Number of test samples (auto-capped to dataset size).')
+    parser.add_argument('--models', nargs='+', default=None, metavar='MODEL',
+                        help='Override the profile model list (filenames without .onnx).')
+    args = parser.parse_args()
+    config['dataset'] = args.dataset
+    if args.num_obs is not None:
+        config['num_obs'] = args.num_obs
+    if args.models is not None:
+        config['model_list'] = args.models
 
 script_dir = Path(__file__).resolve().parent
 
@@ -42,15 +64,13 @@ if 'output_dir' not in config:
     ts = datetime.datetime.now().strftime('%y%m%d-%H%M%S')
     config['output_dir'] = script_dir / 'results' / ts
 
-# Data file name
-config.setdefault('data_file', 'adult_data.npz')
+# Per-dataset run profile: fills in the data file and the models to verify for
+# config['dataset']. Anything already set (CLI / pre-populated) is preserved.
+profile = RUN_PROFILES[config.setdefault('dataset', 'adult')]
+config.setdefault('data_file', profile['data_file'])
+config.setdefault('model_list', profile['model_list'])
 
-# Models to verify (must match filenames without .onnx extension)
-# AC-1: 13→16→8→2 (2 hidden, narrow)
-# AC-3: 13→50→2 (1 hidden, shallow)
-config.setdefault('model_list', ['AC-1', 'AC-3'])
-
-# Number of samples to test (default: 100)
+# Number of samples to test (default: 100; auto-capped to dataset size downstream)
 config.setdefault('num_obs', 100)
 
 # Random seed for reproducibility
@@ -119,7 +139,7 @@ print(" ")
 print("======= STEP 1: Running Verification ==========")
 print(" ")
 
-adult_verify.main(config)
+verify.main(config)
 
 print(" ")
 print("Verification complete.")
