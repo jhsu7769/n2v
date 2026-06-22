@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Tuple
-from n2v.sets import Star, ImageStar, ImageZono, Zono, Box, Hexatope, Octatope
+from typing import List
+from n2v.sets import Star, ImageStar, ImageZono, Box, Hexatope, Octatope
 
 
 def avgpool2d_star(
@@ -75,7 +75,7 @@ def _avgpool2d_imagestar_4d(layer: nn.AvgPool2d, input_star: ImageStar) -> Image
     # V is 4D: (H, W, C, nVar+1)
     V = pad_star.V
     h_in, w_in, c_in, n_cols = V.shape
-    n_pred = n_cols - 1
+    n_cols - 1
 
     # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
     kernel_size = layer.kernel_size
@@ -182,9 +182,13 @@ def avgpool2d_zono(layer: nn.AvgPool2d, input_zonos: List[ImageZono]) -> List[Im
         h_in, w_in, c_in = pad_zono.height, pad_zono.width, pad_zono.num_channels
         n_gen = pad_zono.V.shape[1]
 
-        # Get kernel and stride
-        kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-        stride = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
+        # Get kernel and stride (int, list, or tuple from onnx2torch)
+        def _pair(v):
+            if isinstance(v, (list, tuple)):
+                return (int(v[0]), int(v[1]))
+            return (int(v), int(v))
+        kernel_size = _pair(layer.kernel_size)
+        stride = _pair(layer.stride)
 
         # Calculate output dimensions
         h_out = (h_in - kernel_size[0]) // stride[0] + 1
@@ -230,8 +234,6 @@ def avgpool2d_box(layer: nn.AvgPool2d, input_boxes: List[Box]) -> List[Box]:
     output_boxes = []
     for box in input_boxes:
         # Get bounds
-        lb = box.lb
-        ub = box.ub
 
         # Assume box represents an image - need to know dimensions
         # For simplicity, we'll convert to ImageStar and back
@@ -247,17 +249,23 @@ def avgpool2d_box(layer: nn.AvgPool2d, input_boxes: List[Box]) -> List[Box]:
 
 def _apply_padding_zono(layer: nn.AvgPool2d, input_zono: ImageZono) -> ImageZono:
     """Apply zero padding to ImageZono if needed."""
-    padding = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
+    # layer.padding may be an int, or a list/tuple (onnx2torch yields a
+    # list like [0, 0]); normalize to two ints.
+    pad = layer.padding
+    if isinstance(pad, (list, tuple)):
+        pad_h, pad_w = int(pad[0]), int(pad[1])
+    else:
+        pad_h = pad_w = int(pad)
 
-    if padding == (0, 0):
+    if pad_h == 0 and pad_w == 0:
         return input_zono
 
     h, w, c = input_zono.height, input_zono.width, input_zono.num_channels
     n_gen = input_zono.V.shape[1]
 
     # Padding
-    pad_t, pad_b = padding[0], padding[0]
-    pad_l, pad_r = padding[1], padding[1]
+    pad_t, pad_b = pad_h, pad_h
+    pad_l, pad_r = pad_w, pad_w
 
     h_pad = h + pad_t + pad_b
     w_pad = w + pad_l + pad_r

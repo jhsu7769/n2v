@@ -14,7 +14,6 @@ activation functions (Sigmoid, Tanh) parameterized by:
   - df0: derivative at inflection point (x=0)
 """
 
-import warnings
 import numpy as np
 from typing import List, Optional, Callable
 from n2v.sets import Star, Zono
@@ -154,9 +153,12 @@ def _s_curve_single_star_approx(
     varying_map = np.where(np.abs(ubs - lbs) >= 1e-10)[0]
 
     if len(varying_map) == 0:
-        # All constant — just apply function
+        # All constant — apply the function to the constant VALUE
+        # (lbs == ubs), not the center column: a star can carry its
+        # value in constrained predicate variables (e.g. the z vars of
+        # a McCormick product) with a zero center column.
         new_V = np.zeros_like(I.V)
-        new_V[:, 0] = func(I.V[:, 0])
+        new_V[:, 0] = func(lbs)
         return Star(new_V, I.C, I.d, I.predicate_lb, I.predicate_ub)
 
     # Evaluate function and derivative at bounds
@@ -194,7 +196,7 @@ def _s_curve_single_star_approx(
     # Case classification
     convex_mask = l >= 0       # Case 1
     concave_mask = u <= 0      # Case 2
-    mixed_mask = (l < 0) & (u > 0)  # Case 3
+    (l < 0) & (u > 0)  # Case 3
 
     # Secant slope for all
     secant_slope = (fu - fl) / (u - l)
