@@ -96,6 +96,13 @@ class TestGetConfig:
         cfg = get_config('acasxu_2023', vnnlib_path='prop_1.vnnlib')
         assert cfg['falsify_method'] == 'random+pgd'
 
+    def test_relusplitter_uses_apgd(self):
+        """relusplitter falsify with random+apgd: apgd cracks gold-sat CEs (mnist_fc,
+        oval21) that random+pgd misses (+2 on the K=8 sample, ORT-confirmed)."""
+        cfg = get_config('relusplitter')
+        assert cfg['falsify_method'] == 'random+apgd'
+        assert cfg['falsify_kwargs'] == {'n_restarts': 1, 'n_steps': 30}
+
     def test_probabilistic_configs_have_kwargs(self):
         """All probabilistic methods must specify m, epsilon, and surrogate."""
         PROBABILISTIC_BENCHMARKS = [
