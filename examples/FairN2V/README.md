@@ -146,6 +146,7 @@ config = {
     'epsilon_counterfactual': [0.0], 'epsilon_individual': [0.01],
     'save_png': True, 'save_pdf': True,
 }
+
 verify.main(config)
 plot_results.main(config)
 ```
@@ -161,6 +162,7 @@ or pass a pre-populated `config` dict to the step scripts' `main(config)`
 | `dataset`                 | `'adult'`                        | Dataset profile (`adult`, `adult_debiased`, `german`, `bank`); see `RUN_PROFILES` in `adapter.py` |
 | `model_list`              | profile default (`AC-1, AC-3, AC-4` for adult) | Which models to verify (filenames without `.onnx`) |
 | `num_obs`                 | `100` (capped to dataset size)   | Number of test observations |
+
 | `random_seed`             | `500`                            | RNG seed (NumPy `default_rng`) |
 | `timeout`                 | `600`                            | Per-epsilon timeout (s) |
 | `epsilon_counterfactual`  | `[0.0]`                          | ε grid for counterfactual |
