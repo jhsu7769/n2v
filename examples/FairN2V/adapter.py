@@ -187,6 +187,45 @@ def load_german(data_dir, model_path, data_file='german_data.npz'):
     )
 
 
+# Folktables ACSIncome (US Census, CA 2018 1-Year): predicts income > $50k.
+# Built + trained in-repo (make_folktables_npz.py + train_folktables.py), not
+# ported from NNV; the FT-* nets are trained for argmin, so class_type='min'.
+# The 13-feature representation is shared by the sex and race profiles below
+# (same noun, different fairness verb -- only the sensitive declaration differs):
+#     [AGEP, COW, SCHL, MAR, OCCP, POBP, RELP, WKHP, SEX, RACE_*x4]
+#       0    1     2    3    4     5     6     7    8     9..12
+# Perturbable = the continuous numerical features age and hours-worked
+# ([0]=AGEP, [7]=WKHP); the rest (incl. the race one-hot) are left fixed.
+_FOLKTABLES_PERTURBABLE = [0, 7]
+
+
+def load_folktables(data_dir, model_path, data_file='folktables_data.npz'):
+    """Folktables ACSIncome, SEX profile: sex is binary (column 8)."""
+    return _load_npz_adapter(
+        'folktables', data_dir, model_path, data_file,
+        sensitive_features=[8],
+        perturbable_features=_FOLKTABLES_PERTURBABLE,
+        sensitive_encoding='binary',
+        output_size=2,
+        class_type='min',
+    )
+
+
+def load_folktables_race(data_dir, model_path, data_file='folktables_data.npz'):
+    """Folktables ACSIncome, RACE profile: race is a one-hot block (columns
+    9..12 = White/Black/Asian/Other). Same data file + FT-* nets as the sex
+    profile; only the sensitive declaration changes. Exercises the one-hot
+    counterfactual path (k-1 = 3 counterfactuals per sample)."""
+    return _load_npz_adapter(
+        'folktables_race', data_dir, model_path, data_file,
+        sensitive_features=[9, 10, 11, 12],
+        perturbable_features=_FOLKTABLES_PERTURBABLE,
+        sensitive_encoding='onehot',
+        output_size=2,
+        class_type='min',
+    )
+
+
 def load_bank(data_dir, model_path, data_file='bank_data.npz'):
     """Bank Marketing (UCI). Sensitive attribute: age (binary, column 0).
 
@@ -210,6 +249,8 @@ LOADERS = {
     'adult_debiased': load_adult_debiased,
     'german': load_german,
     'bank': load_bank,
+    'folktables': load_folktables,
+    'folktables_race': load_folktables_race,
 }
 
 
@@ -219,8 +260,10 @@ LOADERS = {
 # one RUN_PROFILES entry. (data_file repeats the loader's own default on
 # purpose, so the runner can check the file exists before loading anything.)
 RUN_PROFILES = {
-    'adult':          {'data_file': 'adult_data.npz',  'model_list': ['AC-1', 'AC-3', 'AC-4']},
-    'adult_debiased': {'data_file': 'adult_data.npz',  'model_list': ['ACD-1', 'ACD-3', 'ACD-4']},
-    'german':         {'data_file': 'german_data.npz', 'model_list': ['GC-1', 'GC-2', 'GC-3']},
-    'bank':           {'data_file': 'bank_data.npz',   'model_list': ['BM-5', 'BM-6', 'BM-7']},
+    'adult':           {'data_file': 'adult_data.npz',  'model_list': ['AC-1', 'AC-3', 'AC-4']},
+    'adult_debiased':  {'data_file': 'adult_data.npz',  'model_list': ['ACD-1', 'ACD-3', 'ACD-4']},
+    'german':          {'data_file': 'german_data.npz', 'model_list': ['GC-1', 'GC-2', 'GC-3']},
+    'bank':            {'data_file': 'bank_data.npz',   'model_list': ['BM-5', 'BM-6', 'BM-7']},
+    'folktables':      {'data_file': 'folktables_data.npz', 'model_list': ['FT-1', 'FT-2', 'FT-3']},
+    'folktables_race': {'data_file': 'folktables_data.npz', 'model_list': ['FT-1', 'FT-2', 'FT-3']},
 }

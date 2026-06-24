@@ -8,6 +8,8 @@ USAGE:
   python run_fairn2v.py --dataset adult_debiased
   python run_fairn2v.py --dataset german
   python run_fairn2v.py --dataset bank
+  python run_fairn2v.py --dataset folktables
+  python run_fairn2v.py --dataset folktables_race
 
 OUTPUTS (under FairN2V/results/<timestamp>/):
   - CSV files with verification results

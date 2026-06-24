@@ -111,6 +111,9 @@ def main(config=None):
         'BM-5': 'Bank Marketing - Model 5',
         'BM-6': 'Bank Marketing - Model 6',
         'BM-7': 'Bank Marketing - Model 7',
+        'FT-1': 'Folktables Income - Model 1',
+        'FT-2': 'Folktables Income - Model 2',
+        'FT-3': 'Folktables Income - Model 3',
     }
 
     ## LaTeX Table 1: Counterfactual Fairness (with timing)
