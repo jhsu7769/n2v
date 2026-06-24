@@ -19,9 +19,16 @@ first definitive result.
 
 The ONNX argument is normally a single path. For the two-network
 relational benchmarks (monotonic_acasxu, isomorphic_acasxu) the harness
-passes a python list literal ``[('f', path), ('g', path)]``; those are
-detected and reported ``unknown`` (relational verification is not yet
-implemented).
+passes a python list literal ``[('f', path), ('g', path)]``; these are
+verified via self-composition (sound joint reach -> UNSAT; falsification
+-> SAT). The relational SAT *witness* is currently conceded to ``unknown``
+because the 2026 relational witness format (per-network ``X_f[i]``/``X_g[i]``
+variables) is unconfirmed -- see ``verify_relational_instance``.
+
+Every single-network ``sat`` witness is re-validated on the RAW ONNX via
+onnxruntime before it is emitted (``n2v.utils.onnx_validate``), so an
+onnx2torch conversion divergence downgrades to ``unknown`` instead of
+producing a witness the official checker would reject.
 """
 
 import ast
@@ -50,6 +57,8 @@ from n2v.nn import NeuralNetwork  # noqa: E402
 from n2v.utils import load_vnnlib, falsify  # noqa: E402
 from n2v.utils.verify_specification import verify_specification  # noqa: E402
 from n2v.utils.model_loader import load_onnx  # noqa: E402
+from n2v.utils.onnx_validate import onnx_forward, in_unsafe_region  # noqa: E402
+from n2v.utils.falsify import _extract_halfspace_groups  # noqa: E402
 from n2v.sets import Star  # noqa: E402
 from n2v.sets.image_star import ImageStar  # noqa: E402
 
@@ -67,6 +76,21 @@ RESULT_SAT = "sat"
 RESULT_UNSAT = "unsat"
 RESULT_UNKNOWN = "unknown"
 RESULT_TIMEOUT = "timeout"
+
+# Per-method falsify budget knobs that a category config may tune via
+# 'falsify_kwargs'. n_samples/method/seed are passed to falsify() EXPLICITLY by
+# the runner, so they must never be threaded here (would raise a duplicate-arg
+# TypeError); only these budget knobs are honored.
+_FALSIFY_KWARG_WHITELIST = {"n_iters", "batch", "p_init",
+                            "n_restarts", "n_steps", "step_size"}
+
+
+def _whitelist_falsify_kwargs(d):
+    """Keep only the whitelisted per-method budget knobs from a config's
+    falsify_kwargs (dropping anything that falsify() already receives
+    explicitly, or any unknown key)."""
+    return {k: v for k, v in (d or {}).items()
+            if k in _FALSIFY_KWARG_WHITELIST}
 
 
 class _Timeout(BaseException):
@@ -179,6 +203,9 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     cfg = get_config(category, onnx_path, vnnlib_path)
     n_rand = cfg.get("n_rand", 100)
     falsify_method = cfg.get("falsify_method", "random+pgd")
+    # Per-method falsify budgets from config (e.g. {'n_iters': 20000} for square,
+    # {'n_restarts': 1, 'n_steps': 30} for apgd), whitelisted to budget knobs only.
+    falsify_kwargs = _whitelist_falsify_kwargs(cfg.get("falsify_kwargs", {}))
 
     workers = _resolve_workers(workers)
     n2v.set_parallel(True, n_workers=workers)
@@ -195,10 +222,26 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
             ub_s = np.asarray(pair["ub"], dtype=np.float64).reshape(input_shape)
             res, cex = falsify(model, lb_s, ub_s, pair["prop"],
                                method=falsify_method,
-                               n_samples=n_rand_per_pair, seed=42)
+                               n_samples=n_rand_per_pair, seed=42,
+                               **falsify_kwargs)
             if res == 0 and cex is not None:
-                return {"result": RESULT_SAT, "time": time.time() - t0,
-                        "counterexample": format_counterexample(cex[0], cex[1])}
+                # P0.2: re-execute the witness on the RAW ONNX in onnxruntime and
+                # confirm it still lands in the unsafe region (constraints met to
+                # 1e-4 abs, per rules.md). Emit the onnxruntime output as the
+                # witness Y so the grader's reproduction check passes by
+                # construction. If ORT disagrees (onnx2torch conversion
+                # divergence), do NOT emit a `sat` that would be scored incorrect
+                # (−150) — keep searching the remaining pairs, then fall to reach.
+                try:
+                    y_ort = onnx_forward(onnx_path, cex[0])
+                    groups = _extract_halfspace_groups(pair["prop"])
+                    if in_unsafe_region(y_ort, groups):
+                        return {"result": RESULT_SAT, "time": time.time() - t0,
+                                "counterexample": format_counterexample(cex[0], y_ort)}
+                    logger.warning("falsify CE rejected by onnxruntime re-check "
+                                   "(onnx2torch divergence); not emitting sat")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("onnxruntime CE re-validation error: %s", e)
         except Exception as e:  # noqa: BLE001
             logger.debug("falsification failed: %s", e)
 
@@ -298,9 +341,18 @@ def verify_relational_instance(onnx_arg, vnnlib_arg, category):
             models[0], models[1], spec, method="approx", n_rand=n_rand,
             seed=42)
         if verdict == "sat":
-            x, y = cex
-            return {"result": RESULT_SAT, "time": time.time() - t0,
-                    "counterexample": format_counterexample(x, y)}
+            # The 2026 relational vnnlib declares PER-NETWORK variables
+            # (X_f[i]/X_g[i], Y_f[i]/Y_g[i]); our flat (X_i, Y_i) witness format
+            # does NOT match, and the relational witness syntax is unspecified in
+            # the rules, so an emitted relational `sat` risks being scored
+            # incorrect (−150). Until the format is confirmed with the organizers
+            # (then re-validate on the raw ONNX like verify_instance), CONCEDE
+            # relational SAT to `unknown` (0, sound) rather than emit a
+            # likely-rejected witness. The sound UNSAT path below is unaffected.
+            logger.warning("relational counterexample found but conceded to "
+                           "unknown (2026 relational witness format unconfirmed)")
+            return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
+                    "counterexample": None}
         if verdict == "unsat":
             return {"result": RESULT_UNSAT, "time": time.time() - t0,
                     "counterexample": None}
