@@ -256,6 +256,36 @@ proven, fall back to the block-diagonal join (sound, looser).
 
 ---
 
+## 6bis. Implementation recipe — symbolic A·V Star (`av_envelope_star`)
+
+The precision primitive (keeps the value-path correlation; the concretize
+driver box-lifts it, which is why it is IBP-class). For `O = A @ V`,
+`A ∈ [a_lb,a_ub]` (a_lb≥0, concretized from softmax), `V` a symbolic Star,
+batched as `A:(H,M,K)`, `V:(H,K,D)`, `O:(H,M,D)`:
+
+1. `vlo,vhi = V.estimate_ranges()` reshaped `(H,K,D)`. Broadcast `a_*→(H,M,K,1)`,
+   `v_*→(H,1,K,D)`. Per `(h,m,k,d)` sign-aware slopes/biases (clamp slopes ≥0):
+   - `vlo≥0`: up=(aub,0), low=(alb,0); `vhi≤0`: up=(alb,0), low=(aub,0);
+   - mixed: `up_slope=(aub·vhi−alb·vlo)/(vhi−vlo)`, `up_bias=alb·vlo−up_slope·vlo`;
+     `low_slope=(alb·vhi−aub·vlo)/(vhi−vlo)`, `low_bias=aub·vlo−low_slope·vlo`.
+2. Contract over k against V's generators `GV=V.V[:,1:]` reshaped `(H,K,D,n_old)`,
+   center `cV` reshaped `(H,K,D)`:
+   - `coef_up = einsum('hmkd,hkdn->hmdn', up_slope, GV)` → `(n_out,n_old)`;
+     `const_up = einsum('hmkd,hkd->hmd', up_slope, cV) + up_bias.sum(k)`; ditto low.
+3. New Star over `[old α | o]`, `n_out=H·M·D` fresh preds, `O_k = α_new_k`:
+   `V_out=[0 | 0 | I_{n_out}]`; constraints (append to padded old C/d):
+   upper `[-coef_up | +I] ≤ const_up`, lower `[ coef_low | −I] ≤ −const_low`;
+   pred bounds `o_lb = Σ_k(low_slope·vlo+low_bias)`, `o_ub = Σ_k(up_slope·vhi+up_bias)`.
+
+Soundness: each facet is an affine bound on `A·V` valid for all `A` in the box
+and all `V` (sign-aware envelope, review §5 confirmed). `O` stays affine in V's
+predicates → input-correlated, so the residual (prefix-aligned, §6.2) keeps the
+stream tight. Test: sample `V∈box`, `A∈[a_lb,a_ub]`, assert `O_star.contains(A@V)`.
+This is CROWN-level precision; combined with BaB (§5/§7) it is the path past the
+IBP-class concretize baseline. (NB: the benchmark filters out
+vanilla-CROWN-certifiable instances, so even this certifies ≈0 at full ε without
+branch-and-bound — it tightens ε\* and shrinks per-node bounds for BaB.)
+
 ## 7. Implementation order (vertical slices, each kept soundness-green)
 
 - **Slice 0 — affine backbone + Box end-to-end.** Conv/BN/Linear/Gemm/ReduceMean/
