@@ -370,9 +370,7 @@ def compute_bounds(surrogate_lb, surrogate_ub, threshold, tau):
 
 1. Hashemi et al. "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks" (NeurIPS 2025)
 
-2. Hashemi et al. "Data-Driven Reachability Analysis via Conformal Prediction" (Older paper, ReLU surrogate approach)
-
-3. Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)
+2. Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)
 
 ## Implementation Files
 
