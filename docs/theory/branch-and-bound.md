@@ -16,25 +16,28 @@ precision tiers, all sound:
 A spec is decided by `verify_specification(reach_sets, spec)` → `UNSAT` (safe) /
 `UNKNOWN`. This is incomplete: a true-but-untight property returns UNKNOWN.
 
-**Search (complete-in-the-limit, sound).** Two manual mechanisms:
-- **Exact ReLU (neuron) splitting** — `NeuralNetwork.reach(..., method='exact')`
-  splits every unstable ReLU via `relu_star_exact`, returning the exact union of
-  linear pieces. This is *complete* ReLU-split verification and already verifies
-  relaxation gaps that `approx` cannot (`tests/unit/test_bab.py::
-  test_exact_relu_split_is_complete`: approx UNKNOWN → exact UNSAT, 27 stars). It
-  explodes (2^#unstable) on large nets.
-- **Branch-and-bound (`n2v/nn/bab.py`)** — `verify_bab` / `verify_bab_model`:
-  the budget-controlled search. Recursively bisect the **input domain**, bound
-  each subdomain (reach + `verify_specification`), try to **falsify** it
-  (`n2v.utils.falsify`, manual random/PGD/APGD), prune the safe ones, branch the
-  rest (sensitivity- or widest-edge). Sound by construction:
-    * prune only on UNSAT; FALSIFIED only with a concrete counterexample;
-    * VERIFIED only when every leaf of a *covering* bisection is safe;
-    * UNKNOWN on node/time budget — never an over-claim.
-  Layer-agnostic: it only touches the input box, reusing the layer-general
-  reach/verify/falsify, so it works for any n2v model. Validated on a toy where
-  single-shot bounding is UNKNOWN but one input split verifies, plus
-  falsification and budget-soundness (`tests/unit/test_bab.py`, 5 tests).
+**Search (complete-in-the-limit, sound).** Three manual mechanisms, all in
+`n2v/nn/bab.py` / `relu_reach.py` (no external verifier):
+- **Exact ReLU splitting** — `NeuralNetwork.reach(..., method='exact')` splits
+  *every* unstable ReLU via `relu_star_exact`, returning the exact union of
+  linear pieces. Complete; verifies relaxation gaps `approx` cannot (approx
+  UNKNOWN → exact UNSAT, 27 stars). Explodes (2^#unstable) — no pruning.
+- **Controlled neuron-split BaB** — `verify_bab_relu` (nn.Sequential of
+  Linear/Flatten/ReLU): branches *one unstable ReLU at a time* (forced
+  active/inactive via halfspace intersection + LP `precomputed_bounds`, so the
+  triangle ReLU treats a forced neuron exactly), **prunes** safe/infeasible
+  subdomains, and falsifies the fixed input box once. The right split space for
+  ReLU classifiers; prunes far below 2^#unstable.
+- **Input-domain BaB** — `verify_bab` / `verify_bab_model`: recursively bisect
+  the **input box**, bound (reach + `verify_specification`), **falsify**
+  (`n2v.utils.falsify`, manual random/PGD/APGD), prune safe, branch rest
+  (sensitivity / widest-edge). Fully layer-agnostic (only touches the input box).
+
+All are sound by construction: prune only on UNSAT (or infeasible split);
+FALSIFIED only with a concrete counterexample; VERIFIED only when every leaf of a
+*covering* split is safe; UNKNOWN on budget — never an over-claim. Validated on a
+relaxation-gap toy (single-shot UNKNOWN → BaB VERIFIED), with falsification and
+budget-soundness (`tests/unit/test_bab.py`, 8 tests).
 
 ## 2. Applying BaB to the ViT benchmark — result
 
