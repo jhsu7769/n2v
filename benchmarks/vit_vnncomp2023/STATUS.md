@@ -71,11 +71,26 @@ softmax are still concretized (so the attention *weights* A remain box-lifted).
 
 Validated on pgd_2_3_16 inst 0 at full ε (LP margins): **sound** (0/3 containment
 violations), and **tighter** — LP min-margin **−522 vs −848** concretize (≈1.6×),
-with **fewer predicates** (4308 vs 14776, since S/A/O are not all box-lifted). So
-the value-path + prefix-residual is a real, sound precision gain. It is not by
-itself enough to certify the (deliberately BaB-hard) instances at full ε — the
-remaining looseness is the box-lifted attention *weights* A, which needs the
-symbolic softmax (design Slices 1–2), and ultimately BaB (§5).
+with **fewer predicates** (4308 vs 14776, since S/A/O are not all box-lifted).
+
+**Concrete win — verifies where the IBP-class baseline cannot.** On ibp_3_3_8
+inst 0 at ε = 0.45/255:
+
+| mode | reach | nVar | LP margin | estimate margin | result |
+|---|---|---|---|---|---|
+| concretize | 31 s | 36130 | −0.066 (8/9 classes) | −0.109 | **unknown** |
+| symbolic-av | 3.5 s | 5559 | **+0.249 (9/9)** | **+0.138** | **VERIFIED** (sound) |
+
+So symbolic-av soundly certifies an instance the concretize/IBP path cannot, and
+is ~9× faster (no box-lift bloat). The precision lever works end-to-end. Note the
+*estimate* margin is also positive — the prefix-residual + av_envelope predicate
+bounds tighten even the fast (no-LP) path, so a symbolic-av sweep need not pay LP
+cost to benefit.
+
+It is still not enough to certify the (deliberately BaB-hard) instances at the
+**full** ε=1/255 — the remaining looseness is the box-lifted attention *weights*
+A, needing the symbolic softmax (Slices 1–2), and ultimately BaB (§5). Symbolic-av
+full-ε verified count: see `results_symbolic_fulleps.csv`.
 
 ## 4. Why full-ε ≈ 0 is principled (the key insight)
 

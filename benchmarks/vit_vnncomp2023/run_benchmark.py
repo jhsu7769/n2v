@@ -42,7 +42,8 @@ def input_box(x_pix, eps):
     return lb.astype(np.float64), ub.astype(np.float64)
 
 
-def run_model(name, num_instances, eps, mode, data_root, writer, relax_factor):
+def run_model(name, num_instances, eps, mode, data_root, writer, relax_factor,
+              margin_mode="estimate"):
     onnx_path = os.path.join(HERE, "onnx", f"{name}.onnx")
     m = build_model(name, onnx_path)
     R = ViTReacher(m, mode=mode, relax_factor=relax_factor)
@@ -61,7 +62,7 @@ def run_model(name, num_instances, eps, mode, data_root, writer, relax_factor):
         lb, ub = input_box(x, eps)
         t0 = time.time()
         try:
-            res = R.verify(lb, ub, y)
+            res = R.verify(lb, ub, y, margin_mode=margin_mode)
             status = res["status"]
             mm = min((v for v in res["margins"].values() if v is not None),
                      default=None)
@@ -82,6 +83,7 @@ def main():
     ap.add_argument("--num-instances", type=int, default=100)
     ap.add_argument("--eps", type=float, default=1.0 / 255)
     ap.add_argument("--mode", default="concretize")
+    ap.add_argument("--margin-mode", default="estimate", choices=["estimate", "lp"])
     ap.add_argument("--relax-factor", type=float, default=0.5)
     ap.add_argument("--data-root", default=DEFAULT_DATA)
     ap.add_argument("--out", default=os.path.join(HERE, "results.csv"))
@@ -93,7 +95,8 @@ def main():
         w.writerow(["model", "instance", "label", "status", "min_margin", "time_s"])
         for name in args.models:
             v, n = run_model(name, args.num_instances, args.eps, args.mode,
-                             args.data_root, w, args.relax_factor)
+                             args.data_root, w, args.relax_factor,
+                             margin_mode=args.margin_mode)
             total_v += v
             total_n += n
             print(f"== {name}: {v}/{n} verified ==")
