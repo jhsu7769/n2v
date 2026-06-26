@@ -9,14 +9,21 @@ now runs inside n2v** and is validated sound (0 containment violations; LP
 membership confirms the reach set encloses sampled outputs). All attention
 primitives have Monte-Carlo soundness tests (145 passing).
 
-At the benchmark's full radius ε = 1/255 it certifies ≈0 instances — and this is
-**expected and principled, not a defect**: the benchmark was constructed by
+Two reach modes: `concretize` (IBP-class) and `symbolic-av` (a CROWN-class
+precision mode — value-path-symbolic A·V + prefix-aligned residual; §3bis). The
+precision mode **soundly verifies instances the IBP baseline cannot** (ibp inst0
+at ε=0.45/255: margin +0.249 vs concretize −0.066) and is ~9× faster.
+
+At the benchmark's full radius ε = 1/255 **both modes certify 0/200** — and this
+is **expected and principled, not a defect**: the benchmark was constructed by
 *removing every instance that vanilla CROWN can already certify*, so **no
 non-branch-and-bound method (IBP, CROWN, or this star verifier) can certify them
-at full ε**. The published sound score (α,β-CROWN **79/200**) comes *entirely*
-from branch-and-bound. Closing the gap therefore requires adding BaB on top of
-the sound reach engine — see §5. "All 200" is beyond the current sound SOTA
-(the 200/200 Marabou entry carries a flagged Gurobi soundness bug).
+at full ε**. With `symbolic-av` the closest margins are only ≈ −0.21 (the gap
+nearly closed), confirming the bar is just out of reach for any incomplete
+method. The published sound score (α,β-CROWN **79/200**) comes *entirely* from
+branch-and-bound; "all 200" is beyond current sound SOTA (the 200/200 Marabou
+entry carries a flagged Gurobi soundness bug). Closing the gap requires adding
+BaB on top of this sound reach engine — see §5.
 
 ## 1. What was built (committed)
 
@@ -87,10 +94,13 @@ is ~9× faster (no box-lift bloat). The precision lever works end-to-end. Note t
 bounds tighten even the fast (no-LP) path, so a symbolic-av sweep need not pay LP
 cost to benefit.
 
-It is still not enough to certify the (deliberately BaB-hard) instances at the
-**full** ε=1/255 — the remaining looseness is the box-lifted attention *weights*
-A, needing the symbolic softmax (Slices 1–2), and ultimately BaB (§5). Symbolic-av
-full-ε verified count: see `results_symbolic_fulleps.csv`.
+**Full-ε sweep (symbolic-av, estimate margins, 200 instances): 0/200** — but the
+gap collapsed: the closest ibp_3_3_8 margins are now ≈ **−0.21** (vs concretize's
+≈ −1.0; pgd stays ≈ −1000). LP margins add only ≈ +0.11 (per the 0.45/255 datum),
+so even symbolic-av+LP stays just short of 0. This is the **principled confirmation
+of §4**: the instances were filtered to defeat every non-BaB method, so a sound
+verifier — even a tight one — lands just below the bar at full ε. Crossing it
+requires branch-and-bound (§5). `results_symbolic_fulleps.csv`.
 
 ## 4. Why full-ε ≈ 0 is principled (the key insight)
 
