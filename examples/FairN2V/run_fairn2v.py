@@ -48,12 +48,16 @@ if 'config' not in locals():
                         help='Number of test samples (auto-capped to dataset size).')
     parser.add_argument('--models', nargs='+', default=None, metavar='MODEL',
                         help='Override the profile model list (filenames without .onnx).')
+    parser.add_argument('--delta', type=float, default=None,
+                        help='Regression tolerance in dollars (overrides adapter default).')
     args = parser.parse_args()
     config['dataset'] = args.dataset
     if args.num_obs is not None:
         config['num_obs'] = args.num_obs
     if args.models is not None:
         config['model_list'] = args.models
+    if args.delta is not None:
+        config['delta'] = args.delta
 
 script_dir = Path(__file__).resolve().parent
 

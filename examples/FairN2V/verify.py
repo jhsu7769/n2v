@@ -24,6 +24,21 @@ from n2v.utils.verify_specification import verify_specification
 from adapter import LOADERS
 
 
+def regression_unsafe_set(y_ref: float, delta: float) -> list[HalfSpace]:
+    """Build unsafe region for regression fairness check.
+
+    Args:
+        y_ref: model's prediction on original sample (dollars)
+        delta: tolerance in dollars
+
+    Returns:
+        list[HalfSpace]: [above, below], each encoding G*y <= g on 1-D output
+    """
+    above = HalfSpace(np.array([[-1.0]]), np.array([[-(y_ref + delta)]]))
+    below = HalfSpace(np.array([[1.0]]), np.array([[y_ref - delta]]))
+    return [above, below]
+
+
 def perturbation_box(x, epsilon, perturbable_features):
     """Build the input Star: an epsilon-box around a (already counterfactual) sample.
 
@@ -171,18 +186,29 @@ def main(config=None):
             num_obs = total_obs
 
         # Test accuracy --> verify matches with python
-        total_corr = 0
-        for i in range(total_obs):
-            x_sample = X_test_loaded[:, i] # shape (n_features,)
-            x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1) # shape (1, n_features)
-            predicted_labels = net.forward(x_t) # same as evaluate; returns output in (1, n_classes) tensor
-            # class_type 'min' -> predicted class is the smaller logit (argmin)
-            pred = int(predicted_labels.argmin()) if adapter.class_type == 'min' else int(predicted_labels.argmax())
-            true_label = y_test_loaded[i]
-            if pred == true_label:
-                total_corr += 1
-        print(f"Model: {model_name}")
-        print(f"Accuracy of Model: {total_corr / total_obs}")
+        if adapter.task == "regression":
+            preds = np.array([
+                float(net.forward(
+                    torch.tensor(X_test_loaded[:, i], dtype=torch.float32).reshape(1, -1)
+                ).item())
+                for i in range(total_obs)
+            ])
+            mae = np.mean(np.abs(preds - y_test_loaded))
+            print(f"Model: {model_name}")
+            print(f"MAE: ${mae:,.0f}")
+        else:
+            total_corr = 0
+            for i in range(total_obs):
+                x_sample = X_test_loaded[:, i] # shape (n_features,)
+                x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1) # shape (1, n_features)
+                predicted_labels = net.forward(x_t) # same as evaluate; returns output in (1, n_classes) tensor
+                # class_type 'min' -> predicted class is the smaller logit (argmin)
+                pred = int(predicted_labels.argmin()) if adapter.class_type == 'min' else int(predicted_labels.argmax())
+                true_label = y_test_loaded[i]
+                if pred == true_label:
+                    total_corr += 1
+            print(f"Model: {model_name}")
+            print(f"Accuracy of Model: {total_corr / total_obs}")
 
         ## Verification
 
@@ -210,7 +236,12 @@ def main(config=None):
             for i in range(num_obs):
                 idx = rand_indices[i]
                 x_sample = X_test_loaded[:, idx]
+                delta = config.get('delta', adapter.delta)  # config overrides adapter default
                 target = y_test_loaded[idx]
+
+                if adapter.task == "regression":
+                    x_t = torch.tensor(x_sample, dtype=torch.float32).reshape(1, -1)
+                    y_ref = float(net.forward(x_t).item())
 
                 t = time.time() # start timing the verification for each sample
 
@@ -223,7 +254,10 @@ def main(config=None):
                     R = net.reach(IS, method=reach_method) # generate output set
 
                     # Process fairness specification
-                    spec = robustness_set(target, R[0].dim, adapter.class_type)
+                    if adapter.task == "regression":
+                        spec = regression_unsafe_set(y_ref, delta)
+                    else:
+                        spec = robustness_set(target, R[0].dim, adapter.class_type)
 
                     # one counterfactual violating the spec is enough to mark unfair
                     result = verify_specification(R, spec)

@@ -43,6 +43,10 @@ class DatasetAdapter:
     output_size: int                # number of output classes
     class_type: str                 # 'min' or 'max' -- how this net picks the class
 
+    # --- tasks ---
+    task: str = 'classification'    # 'classification' | 'regression'
+    delta: float = None             # default tolerance for regression
+
     def counterfactuals(self, x):
         """Return the counterfactual versions of x w.r.t. the sensitive attribute.
 
@@ -87,7 +91,7 @@ class DatasetAdapter:
         )
 
 
-def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
+def _load_npz_adapter(name, data_dir, model_path, data_file, task='classification', **declaration):
     """Shared loader for npz datasets in the FairNNV `X`/`y` format.
 
     Loads + min-max normalizes the data and wraps the ONNX model, then stamps
@@ -100,6 +104,7 @@ def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
         data_dir:    directory containing the .npz data file
         model_path:  path to the .onnx model to verify
         data_file:   name of the .npz file inside data_dir
+        task:        task: classification | regression. default to classification
         declaration: the fairness fields (sensitive_features, perturbable_features,
                      sensitive_encoding, output_size, class_type)
 
@@ -114,7 +119,7 @@ def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
     y = data['y']
 
     X_test_loaded = X.T
-    y_test_loaded = y[:, 0].astype(int)
+    y_test_loaded = y[:, 0].astype(int) if task == "classification" else y[:, 0].astype(float)
 
     # --- normalize ---
     min_values = X_test_loaded.min(axis=1)
@@ -129,7 +134,8 @@ def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
 
     # --- load + wrap the model ---
     netONNX = load_onnx(model_path)
-    netONNX = strip_final_softmax(netONNX)  # drop trailing softmax for Star reachability
+    if task == "classification":  # regression needs no softmax strip
+        netONNX = strip_final_softmax(netONNX)  # drop trailing softmax for Star reachability
     net = NeuralNetwork(netONNX)
 
     return DatasetAdapter(
@@ -139,6 +145,7 @@ def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
         min_values=min_values,
         max_values=max_values,
         net=net,
+        task=task,
         **declaration,
     )
 
@@ -242,6 +249,20 @@ def load_bank(data_dir, model_path, data_file='bank_data.npz'):
     )
 
 
+def load_medcost(data_dir, model_path, data_file='medcost_data.npz'):
+    """Medical-costs regression (Kaggle insurance). Sensitive: sex (binary, col 3)."""
+    return _load_npz_adapter(
+            'medcost', data_dir, model_path, data_file,
+            task='regression',
+            sensitive_features=[3],
+            perturbable_features=[0,1],  # age, bmi
+            sensitive_encoding='binary',
+            output_size=1,
+            class_type='min',  # unused for regression
+            delta=500.0,  # default tolerance in dollars
+    )
+
+
 # Registry: dataset key -> loader. The verification driver picks one via
 # config['dataset'], so adding a dataset = write a loader + add one line here.
 LOADERS = {
@@ -251,6 +272,7 @@ LOADERS = {
     'bank': load_bank,
     'folktables': load_folktables,
     'folktables_race': load_folktables_race,
+    'medcost': load_medcost,
 }
 
 
@@ -266,4 +288,5 @@ RUN_PROFILES = {
     'bank':            {'data_file': 'bank_data.npz',   'model_list': ['BM-5', 'BM-6', 'BM-7']},
     'folktables':      {'data_file': 'folktables_data.npz', 'model_list': ['FT-1', 'FT-2', 'FT-3']},
     'folktables_race': {'data_file': 'folktables_data.npz', 'model_list': ['FT-1', 'FT-2', 'FT-3']},
+    'medcost':         {'data_file': 'medcost_data.npz', 'model_list': ['MC-1', 'MC-2', 'MC-3']},
 }
