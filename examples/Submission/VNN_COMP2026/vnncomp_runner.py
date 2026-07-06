@@ -36,6 +36,7 @@ import gzip
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import signal
 import sys
@@ -104,6 +105,20 @@ def _on_alarm(signum, frame):
     raise _Timeout()
 
 
+def _arm_timeout(timeout):
+    """Self-enforce TIMEOUT via SIGALRM where available (POSIX competition host).
+    On platforms without setitimer/SIGALRM (e.g. Windows, for local testing) this
+    is a no-op and we rely on the harness's hard kill at TIMEOUT+60."""
+    if hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer"):
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+
+
+def _disarm_timeout():
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 # ---------------------------------------------------------------------------
 # Model / input-set helpers
 # ---------------------------------------------------------------------------
@@ -163,9 +178,62 @@ def create_input_set(lb, ub, input_shape):
     return Star.from_bounds(lb, ub)
 
 
-def format_counterexample(input_vec, output_vec):
+def _v2_ce_meta(vnnlib_path):
+    """Declared I/O tensors of a VNNLIB 2.0 spec, in declaration order, for the
+    section-5.3 textual counterexample format: a list of ``(name, dtype,
+    dims)``. Returns ``None`` for a 1.0 spec (no ``(vnnlib-version ...)``
+    header), so the caller falls back to the legacy s-expr. Mirrors NNV's
+    ``i_vnnlib2_ce_meta`` regex so our witnesses are byte-compatible with what
+    the official 2.0 checker (``counterexamples_v2.py``) accepts."""
+    if not vnnlib_path:
+        return None
+    try:
+        with open(vnnlib_path) as f:
+            txt = f.read()
+    except Exception:  # noqa: BLE001
+        return None
+    if not re.search(r"\(\s*vnnlib-version", txt):
+        return None
+    meta = []
+    for m in re.finditer(
+            r"\(\s*declare-(?:input|output)\s+(\S+)\s+(\S+)\s+\[([0-9,\s]*)\]",
+            txt):
+        dims = m.group(3).strip()
+        shape = [int(d) for d in dims.split(",") if d.strip()] if dims else []
+        meta.append((m.group(1), m.group(2), shape))
+    return meta or None
+
+
+def _format_ce_v2(meta, input_vec, output_vec):
+    """VNNLIB 2.0 section-5.3 textual witness: for each declared tensor, a
+    ``name dtype [d0,d1,...]`` header then its C-order values one per line, in
+    declaration order (Y* blocks drawn from the output witness, others from the
+    input witness). The 1.0 ``(X_i v)`` s-expr is scored ``malformed_ce`` for a
+    2.0 spec, which is why our 2.0-track SAT witnesses came back invalid."""
+    out = []
+    xi = yi = 0
+    for name, dtype, shape in meta:
+        n = int(np.prod(shape)) if shape else 1
+        dimstr = ",".join(str(d) for d in shape) if shape else "1"
+        out.append(f"{name} {dtype} [{dimstr}]")
+        if name.upper().startswith("Y"):
+            blk = output_vec[yi:yi + n]; yi += n
+        else:
+            blk = input_vec[xi:xi + n]; xi += n
+        out.extend(format(float(v), ".16g") for v in blk)
+    return "\n".join(out)
+
+
+def format_counterexample(input_vec, output_vec, vnnlib_path=None):
+    """Emit the SAT witness in the format the grader expects for this spec's
+    VNNLIB version: the section-5.3 textual assignment format for 2.0 specs,
+    else the legacy ``((X_i v)...(Y_j v))`` s-expr for 1.0. The official 2.0
+    checker rejects a 1.0-format witness as ``malformed_ce`` and vice-versa."""
     input_vec = np.asarray(input_vec).flatten()
     output_vec = np.asarray(output_vec).flatten()
+    meta = _v2_ce_meta(vnnlib_path)
+    if meta:
+        return _format_ce_v2(meta, input_vec, output_vec)
     lines = [f"(X_{i}  {v})" for i, v in enumerate(input_vec)]
     lines += [f"(Y_{i}  {v})" for i, v in enumerate(output_vec)]
     return "(" + "\n".join(lines) + ")"
@@ -192,8 +260,33 @@ def _resolve_workers(workers):
 
 def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     t0 = time.time()
-    model = load_onnx(onnx_path)
     prop = load_vnnlib(vnnlib_path)
+
+    # Multimodal / multi-input specs (e.g. smart_turn: X1 [1,80,800] + X2
+    # [1,3,32,112,112] -> a ~1.27M-dim joint input). The sound-reach path builds
+    # one input set over the CONCATENATED joint space, whose dense generator is
+    # infeasible (an n-by-n diagonal at n ~ 1.27M is 11.7 TiB); there is no
+    # multi-input set construction in the reach path. Concede `unknown` (sound,
+    # -150-safe) from the spec header BEFORE loading the (124 MB) model, instead
+    # of attempting -- and OOMing on -- the dense set. Mirrors NNV's header-level
+    # multimodal gate.
+    if len(prop.get("input_tensors", [])) > 1:
+        logger.info("multi-input/multimodal spec (%d input tensors): sound reach "
+                    "over the joint input is intractable; conceding unknown",
+                    len(prop["input_tensors"]))
+        return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
+                "counterexample": None}
+
+    # ViT (transformer self-attention): onnx2torch cannot ingest the exported
+    # graph (Slice v1 + per-token BatchNorm), and a star+LP attention reach does
+    # not scale. Route to the LP-free CROWN attention verifier (method translated from NNV
+    # ViTCrown): reconstruct ViT_BN from the ONNX initializers, lower to the CROWN
+    # op DAG, and prove robustness with backward linear bounds + refinement + α.
+    if category and "vit" in category.lower():
+        return verify_vit_instance(onnx_path, prop, get_input_shape(onnx_path),
+                                   category, t0, vnnlib_path, workers=workers)
+
+    model = load_onnx(onnx_path)
     input_shape = get_input_shape(onnx_path)
 
     # Nonlinear output property (Pow/Mul over the variables): no linear
@@ -253,7 +346,8 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                     groups = _extract_halfspace_groups(pair["prop"])
                     if in_unsafe_region(y_ort, groups, tol=0.0):
                         return {"result": RESULT_SAT, "time": time.time() - t0,
-                                "counterexample": format_counterexample(cex[0], y_ort)}
+                                "counterexample": format_counterexample(
+                                    cex[0], y_ort, vnnlib_path)}
                     logger.warning("falsify CE rejected by onnxruntime re-check "
                                    "(onnx2torch divergence); not emitting sat")
                 except Exception as e:  # noqa: BLE001
@@ -276,7 +370,32 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                 reach_sets = net.reach(input_set, method=method, **extra)
                 verdict = verify_specification(reach_sets, pair["prop"])
                 if verdict.verdict == "SAT":
-                    return {"result": RESULT_SAT, "time": time.time() - t0,
+                    # Sound reach proved a counterexample EXISTS (only EXACT
+                    # reach can soundly return SAT; approx over-approx cannot).
+                    # A `sat` WITHOUT a witness is penalized -150 by the grader,
+                    # so emit the reach witness, re-validated on the raw ONNX at
+                    # zero output tolerance exactly like the falsification path.
+                    # If no witness can be validated, concede `unknown` (0, safe)
+                    # rather than a witness-less sat or an (unsound) unsat.
+                    cx = getattr(verdict, "counterexample_x", None)
+                    if cx is not None:
+                        try:
+                            cx = np.asarray(cx, dtype=np.float64).flatten()
+                            y_ort = onnx_forward(onnx_path, cx)
+                            groups = _extract_halfspace_groups(pair["prop"])
+                            if in_unsafe_region(y_ort, groups, tol=0.0):
+                                return {"result": RESULT_SAT,
+                                        "time": time.time() - t0,
+                                        "counterexample":
+                                            format_counterexample(
+                                                cx, y_ort, vnnlib_path)}
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("reach-SAT witness ORT re-validation "
+                                           "error: %s", e)
+                    logger.warning("reach returned SAT without a validatable "
+                                   "witness; conceding unknown (sat-without-"
+                                   "witness is penalized)")
+                    return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
                             "counterexample": None}
                 elif verdict.verdict == "UNSAT":
                     continue
@@ -367,7 +486,8 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                 if np.all(np.isfinite(y_ort)) and \
                         evaluate_nonlinear(prop, x.ravel(), y_ort):
                     return {"result": RESULT_SAT, "time": time.time() - t0,
-                            "counterexample": format_counterexample(x, y_ort)}
+                            "counterexample": format_counterexample(
+                                x, y_ort, vnnlib_path)}
                 logger.warning("nonlinear CE rejected by onnxruntime re-check "
                                "(onnx2torch divergence / non-finite); not "
                                "emitting sat")
@@ -401,6 +521,98 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
 
     return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
             "counterexample": None}
+
+
+def _vit_pgd(md, lb, ub, group, rng, n_starts=8, steps=60):
+    """Gradient counterexample search on the reconstructed ViT (torch): drive the
+    worst OR-halfspace value ``min_k (G_k @ Y - g_k)`` <= 0 inside the box."""
+    import torch
+    G = torch.tensor(np.vstack([np.atleast_2d(h.G) for h in group]), dtype=torch.float64)
+    g = torch.tensor(np.concatenate([np.asarray(h.g).reshape(-1) for h in group]),
+                     dtype=torch.float64)
+    lo = torch.tensor(lb.reshape(3, 32, 32)); hi = torch.tensor(ub.reshape(3, 32, 32))
+    outs = []
+    for _ in range(n_starts):
+        x0 = lb + (ub - lb) * rng.random(lb.size)
+        x = torch.tensor(x0.reshape(3, 32, 32), dtype=torch.float64, requires_grad=True)
+        opt = torch.optim.Adam([x], lr=1e-2)
+        for _ in range(steps):
+            opt.zero_grad()
+            y = md(x.reshape(1, 3, 32, 32))[0]
+            (G @ y - g).min().backward()
+            opt.step()
+            with torch.no_grad():
+                x.clamp_(lo, hi)
+        outs.append(x.detach().reshape(-1).cpu().numpy())
+    return np.asarray(outs)
+
+
+def verify_vit_instance(onnx_path, prop, input_shape, category, t0,
+                        vnnlib_path=None, workers=None):
+    """Verify a ViT robustness instance LP-free (method translated from NNV ViTCrown, no NNV dep).
+
+    SAT iff a falsifier (random + ViT-gradient PGD), re-validated on the RAW ONNX
+    in onnxruntime at zero tolerance, lands in the unsafe region. UNSAT iff the
+    LP-free CROWN reach proves every (region, prop) pair disjoint from its unsafe
+    region (a pair is safe iff SOME OR-group is fully unreachable, i.e. CROWN
+    bounds ``G_k @ Y > g_k`` for every row). Else unknown (sound)."""
+    import torch
+    from n2v.nn.vit_crown import load_vit_onnx, to_ops, verify_halfspace_group_safe
+
+    try:
+        model = load_vit_onnx(onnx_path)
+        ops = to_ops(model)
+    except Exception as e:  # noqa: BLE001 — unfamiliar ViT graph: concede unknown
+        logger.warning("ViT reconstruction failed (%s); unknown", e)
+        return {"result": RESULT_UNKNOWN, "time": time.time() - t0, "counterexample": None}
+
+    pairs = prop["pairs"]
+    cfg = get_config(category, onnx_path, None)
+    n_rand = cfg.get("n_rand", 200)
+    rng = np.random.default_rng(42)
+    fwd = make_onnx_forward(onnx_path)
+
+    # Stage 1: falsification (counterexample search), grader-validated on raw ONNX.
+    for pair in pairs:
+        lb = np.asarray(pair["lb"], dtype=np.float64).reshape(-1)
+        ub = np.asarray(pair["ub"], dtype=np.float64).reshape(-1)
+        groups = _extract_halfspace_groups(pair["prop"])
+        X = lb + (ub - lb) * rng.random((n_rand, lb.size))
+        try:
+            X = np.vstack([X] + [_vit_pgd(model, lb, ub, gp, rng) for gp in groups])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ViT PGD failed: %s", e)
+        Y = fwd(X)
+        for i in range(X.shape[0]):
+            if in_unsafe_region(Y[i], groups, tol=0.0):
+                return {"result": RESULT_SAT, "time": time.time() - t0,
+                        "counterexample": format_counterexample(
+                            X[i], Y[i], vnnlib_path)}
+
+    # Stage 2: LP-free CROWN reach. UNSAT iff every pair is provably safe.
+    all_unsat = True
+    for pair in pairs:
+        lb = np.asarray(pair["lb"], dtype=np.float64).reshape(-1)
+        ub = np.asarray(pair["ub"], dtype=np.float64).reshape(-1)
+        groups = _extract_halfspace_groups(pair["prop"])
+        pair_safe = False
+        for group in groups:           # AND across groups: safe if ANY is unreachable
+            G = np.vstack([np.atleast_2d(h.G) for h in group])
+            g = np.concatenate([np.asarray(h.g).reshape(-1) for h in group])
+            try:
+                safe, _ = verify_halfspace_group_safe(
+                    ops, lb, ub, G, g, refine=True, refine_iters=2, alpha=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("CROWN reach error: %s", e)
+                safe = False
+            if safe:
+                pair_safe = True
+                break
+        if not pair_safe:
+            all_unsat = False
+    if all_unsat:
+        return {"result": RESULT_UNSAT, "time": time.time() - t0, "counterexample": None}
+    return {"result": RESULT_UNKNOWN, "time": time.time() - t0, "counterexample": None}
 
 
 def write_result(results_file, result_str, counterexample=None):
@@ -508,8 +720,7 @@ def main():
     if onnx_arg.startswith('"') and onnx_arg.endswith('"'):
         onnx_arg = onnx_arg[1:-1]
     if onnx_arg.strip().startswith("["):
-        signal.signal(signal.SIGALRM, _on_alarm)
-        signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+        _arm_timeout(timeout)
         try:
             result = verify_relational_instance(onnx_arg, vnnlib_arg, category)
         except _Timeout:
@@ -518,7 +729,7 @@ def main():
             logger.error("relational verification error: %s", e)
             result = {"result": RESULT_UNKNOWN, "counterexample": None}
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            _disarm_timeout()
         write_result(results_file, result["result"],
                      result.get("counterexample"))
         print(result["result"])
@@ -529,8 +740,7 @@ def main():
     onnx_path, onnx_tmp = _maybe_decompress(onnx_arg)
     vnnlib_path, vnnlib_tmp = _maybe_decompress(vnnlib_arg)
 
-    signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+    _arm_timeout(timeout)
     try:
         result = verify_instance(onnx_path, vnnlib_path, category)
     except _Timeout:
@@ -539,7 +749,7 @@ def main():
         logger.error("verification error: %s", e)
         result = {"result": RESULT_UNKNOWN, "counterexample": None}
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        _disarm_timeout()
         if onnx_tmp and os.path.exists(onnx_path):
             os.remove(onnx_path)
         if vnnlib_tmp and os.path.exists(vnnlib_path):
