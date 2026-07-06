@@ -1,4 +1,4 @@
-# FairN2V - Fairness Verification of Tabular Classifiers
+# FairN2V - Fairness Verification
 
 Exact reachability-based verification of two notions of fairness on
 binary classifiers trained on tabular datasets — UCI Adult-Income,
@@ -17,7 +17,7 @@ proportion of test samples for which fairness is formally certified.
 
 This example is a Python port — for the [`n2v`](../../) toolbox — of the
 MATLAB **FairNNV** example that ships with NNV. The verification logic, models,
-and datasets are carried over directly; see [References](#references).
+and NNV-derived datasets are carried over directly; see [References](#references).
 
 The four NNV-derived profiles have been checked against NNV on MATLAB's exact
 seed-500 samples (`rng(500); randsample(...)`), across both fairness notions and
@@ -29,15 +29,13 @@ builds a valid input box but MATLAB fed `ImageStar` a degenerate `lb > ub`
 one. The divergence is therefore a deliberate soundness fix, not a mismatch —
 matching NNV exactly there would mean reproducing the bug.
 
-**`folktables`** has no NNV counterpart — it is built and trained entirely in
-this repo (`make_folktables_npz.py` + `train_folktables.py`) to show the adapter
-extends cleanly to a new dataset. Built from the ACSIncome task (predict income
-> $50k), with the ordinal race code `RAC1P` one-hot encoded into 13 features, it
-serves two profiles from one dataset and one set of FT-* nets: `folktables`
-verifies **sex** (binary), `folktables_race` verifies **race** (one-hot, which
-exercises the adapter's k−1 counterfactual path the binary profiles never
-reach). The FT-* nets follow the ported conventions (argmin / `class_type='min'`,
-softmax stripped before reachability). See [Adding a dataset](#adding-a-dataset).
+**`folktables`** has no NNV counterpart — its data and FT-* nets are built from
+scratch to show the adapter extends cleanly to a new dataset. Built from the
+ACSIncome task (predict income > $50k), with the ordinal race code `RAC1P`
+one-hot encoded into a 4-way block (13 features total), it serves two profiles
+from one dataset and one set of FT-* nets: `folktables` verifies **sex** (binary)
+and `folktables_race` verifies **race** (one-hot). See
+[Adding a dataset](#adding-a-dataset).
 
 ## References
 
@@ -47,12 +45,12 @@ softmax stripped before reachability). See [Adding a dataset](#adding-a-dataset)
   ACM International Conference on AI in Finance (ICAIF '24), 2024.
 - **Counterfactual fairness definition**: Kusner, M.J., Loftus, J.R.,
   Russell, C., Silva, R. *Counterfactual fairness.* NeurIPS 2017.
-- **Adult-Income dataset**: Dheeru & Efi. *UCI Machine Learning
-  Repository — Adult.* 2017.
-- **German-Credit dataset**: Dheeru, D., & Efi, K. T. *UCI Machine 
-  Learning Repository: Statlog (German Credit Data) data set.* 2017. 
-- **Bank-Marketing dataset**: Moro, S., Cortez, P., & Rita, P. *UCI 
-  Machine Learning Repository: Bank Marketing data set.* 2014. 
+- **Adult-Income dataset**: Becker, B. & Kohavi, R. *Adult.*
+  UCI Machine Learning Repository, 1996.
+- **German-Credit dataset**: Hofmann, H. *Statlog (German Credit Data).*
+  UCI Machine Learning Repository, 1994.
+- **Bank-Marketing dataset**: Moro, S., Rita, P., Cortez, P. *Bank Marketing.*
+  UCI Machine Learning Repository, 2014.
 - **folktables / ACSIncome**: Ding, F., Hardt, M., Miller, J., Schmidt, L.
   *Retiring Adult: New Datasets for Fair Machine Learning.* NeurIPS 2021.
 
@@ -81,7 +79,7 @@ The FT-* nets are shared by both folktables profiles — `folktables` (sex) and
 `folktables_race` (race) verify the *same* data and the *same* nets; only the
 sensitive declaration in [`adapter.py`](adapter.py) differs.
 
-Each model ends in a softmax; the runner strips it before reachability and
+Each model ends in a softmax; the adapter strips it before reachability and
 verifies on the logits (softmax is order-preserving, so the predicted class is
 unchanged and the output specification stays linear).
 
@@ -100,34 +98,30 @@ verification pipeline):
 | `bank_data.npz`   | `…/examples/Submission/ICAIF24/data/bank_data.mat`  | `(6098, 16)` | `(6098, 2)` |
 
 `folktables_data.npz` `(20000, 13)` / `(20000, 2)` is the exception: it has no
-upstream `.mat`. `make_folktables_npz.py` builds it from the folktables
-ACSIncome task (California, 2018 1-Year), one-hot encoding the ordinal `RAC1P`
-race code into a 4-way block (hence 13 columns, not the task's raw 10) and
-subsampling to 20 000 rows with a fixed seed. Same `X`/`y` layout as the others
-(column 0 of `y` is 1 for income > $50k); one file serves both the `folktables`
-(sex) and `folktables_race` (race) profiles. The `adult_debiased` profile
-likewise reuses `adult_data.npz` (same data; only the verified models differ).
+upstream `.mat`. It is built from the folktables ACSIncome task (California, 2018
+1-Year), one-hot encoding the ordinal `RAC1P` race code into a 4-way block (hence
+13 columns, not the task's raw 10) and subsampling to 20 000 rows with a fixed
+seed. Same `X`/`y` layout as the others (column 0 of `y` is 1 for income > $50k);
+one file serves both the `folktables` (sex) and `folktables_race` (race)
+profiles. The `adult_debiased` profile likewise reuses `adult_data.npz` (same
+data; only the verified models differ).
 
 ## Layout
 
 ```
 examples/FairN2V/
 ├── README.md
-├── run_fairn2v.py      Top-level runner; sets config and chains the steps
+├── run_fairn2v.py      Top-level runner (argparse); builds config, chains the steps
 ├── verify.py           Loads ONNX, runs reachability + verification, writes CSVs
 ├── plot_results.py     Reads the latest CSVs, generates figures + LaTeX tables
 ├── adapter.py          DatasetAdapter + per-dataset loaders (LOADERS / RUN_PROFILES)
-├── dataset_prep/
-│   ├── make_folktables_npz.py  Builds data/folktables_data.npz from folktables ACSIncome
-│   └── train_folktables.py     Trains + exports the FT-* nets (folktables has no NNV models)
 ├── models/             AC-*, ACD-*, GC-*, BM-*, FT-*.onnx
 ├── data/               adult_data.npz, german_data.npz, bank_data.npz, folktables_data.npz
 └── results/            Timestamped output (<yymmdd-HHMMSS>/)
 ```
 
-`verify.py` and `plot_results.py` can also run standalone — they
-fall back to default paths in this folder when `config` is not already
-in scope.
+`verify.py` and `plot_results.py` can also run standalone — called with no
+`config`, they fall back to default paths in this folder.
 
 ## Running
 
@@ -154,8 +148,8 @@ debiased half of its biased-vs-debiased comparison.
 
 `folktables` and `folktables_race` verify the same data and the same FT-* nets,
 differing only in the sensitive attribute: **sex** (binary) vs **race**
-(one-hot). The data and models are committed; `dataset_prep/` holds the scripts
-that built them.
+(one-hot). The data and models are committed; the scripts that built them live
+in a separate prep repo (see [Adding a dataset](#adding-a-dataset)).
 
 `--dataset` selects a profile from `RUN_PROFILES` in
 [`adapter.py`](adapter.py) (the data file and the models to verify); `adult`
@@ -168,10 +162,12 @@ the profile's model list.
 
 ### Smoke / custom run
 
-There is no separate smoke flag. Either edit the `CONFIGURATION` block at the
-top of [`run_fairn2v.py`](run_fairn2v.py) (e.g. `model_list=['AC-1']`,
-`num_obs=10`, `epsilon_individual=[0.01]`, `timeout=120`) and run it the same
-way, or call the step scripts' `main(config)` directly for a one-off:
+There is no separate smoke flag. The quickest custom run is CLI flags — e.g.
+`python run_fairn2v.py --models AC-1 --num-obs 10`. For the other knobs, edit the
+UPPERCASE constants in the `CONFIGURATION` block at the top of
+[`run_fairn2v.py`](run_fairn2v.py) (e.g. `NUM_OBS = 10`, `EPSILON_INDIVIDUAL =
+[0.01]`, `TIMEOUT = 120`). The step scripts' `main(config)` can also be called
+directly for a one-off:
 
 ```python
 from pathlib import Path
@@ -191,21 +187,22 @@ plot_results.main(config)
 
 ## Configuration parameters
 
-Edit the `CONFIGURATION` block at the top of [`run_fairn2v.py`](run_fairn2v.py),
-or pass a pre-populated `config` dict to the step scripts' `main(config)`
-(the runner uses `setdefault`, so any caller-supplied values are preserved):
+The run knobs are UPPERCASE constants in the `CONFIGURATION` block at the top of
+[`run_fairn2v.py`](run_fairn2v.py); `build_config()` folds them (together with the
+`--dataset`, `--num-obs`, and `--models` CLI overrides) into the `config` dict the
+step scripts consume. That same dict can be passed straight to
+`verify.main(config)` / `plot_results.main(config)`:
 
-| Key                       | Default                          | Effect |
+| Constant / arg            | Default                          | Effect |
 |---------------------------|----------------------------------|--------|
-| `dataset`                 | `'adult'`                        | Dataset profile (`adult`, `adult_debiased`, `german`, `bank`, `folktables`, `folktables_race`); see `RUN_PROFILES` in `adapter.py` |
-| `model_list`              | profile default (`AC-1, AC-3, AC-4` for adult) | Which models to verify (filenames without `.onnx`) |
-| `num_obs`                 | `100` (capped to dataset size)   | Number of test observations |
-
-| `random_seed`             | `500`                            | RNG seed (NumPy `default_rng`) |
-| `timeout`                 | `600`                            | Per-epsilon timeout (s) |
-| `epsilon_counterfactual`  | `[0.0]`                          | ε grid for counterfactual |
-| `epsilon_individual`      | `[0.01,0.02,0.03,0.05,0.07,0.1]` | ε grid for individual |
-| `save_png` / `save_pdf`   | `True`                           | Figure formats to write |
+| `--dataset`               | `'adult'`                        | Dataset profile (`adult`, `adult_debiased`, `german`, `bank`, `folktables`, `folktables_race`); see `RUN_PROFILES` in `adapter.py` |
+| `--models`                | profile default (`AC-1, AC-3, AC-4` for adult) | Which models to verify (filenames without `.onnx`) |
+| `NUM_OBS` / `--num-obs`   | `100` (capped to dataset size)   | Number of test observations |
+| `RANDOM_SEED`             | `500`                            | RNG seed (NumPy `default_rng`) |
+| `TIMEOUT`                 | `600`                            | Per-epsilon timeout (s) |
+| `EPSILON_COUNTERFACTUAL`  | `[0.0]`                          | ε grid for counterfactual |
+| `EPSILON_INDIVIDUAL`      | `[0.01,0.02,0.03,0.05,0.07,0.1]` | ε grid for individual |
+| `SAVE_PNG` / `SAVE_PDF`   | `True`                           | Figure formats to write |
 
 ## Adding a dataset
 
@@ -218,20 +215,13 @@ thin `load_*` wrapper plus one `LOADERS` and one `RUN_PROFILES` entry in
 the loading, min-max normalization, and softmax-stripped model wrapping.
 
 `folktables` is the worked example of adding one *from scratch* (no upstream
-`.mat` or ONNX), in two scripts:
-
-1. **`make_folktables_npz.py`** — fetches the data (folktables ACSIncome) and
-   writes `data/folktables_data.npz` in the same raw-`X` / one-hot-`y` layout.
-2. **`train_folktables.py`** — trains the FT-* nets and exports ONNX (ReLU stack
-   + Softmax tail, dynamic batch, opset 13). Two conventions must match the rest:
-   the nets predict via **argmin** (trained on negated logits) so the loader can
-   use `class_type='min'`; and training normalizes with the **same** min-max
-   stats the adapter recomputes from the npz at verification time, so the inputs
-   line up. If the printed training accuracy round-trips through the smoke run's
-   "Accuracy of Model" line, the conventions are consistent.
-
-Then wire it like any other: `load_folktables` + a `LOADERS` entry + a
-`RUN_PROFILES` entry, and add display names in
+`.mat` or ONNX). The scripts that build `folktables_data.npz` and train/export
+the FT-* nets — and the conventions they must satisfy to line up with the adapter
+(argmin nets so the loader can use `class_type='min'`; the same min-max stats the
+adapter recomputes from the npz, so inputs line up) — live in a separate repo to
+keep n2v small: **[dataset-prep-fairn2v](https://github.com/jhsu7769/dataset-prep-fairn2v)**.
+Once the data and ONNX are in place, wire it like any other: `load_folktables` +
+a `LOADERS` entry + a `RUN_PROFILES` entry, and add display names in
 [`plot_results.py`](plot_results.py).
 
 `folktables_race` shows the cheap case — a new fairness *verb* over existing
@@ -267,15 +257,9 @@ time for a full sweep (3 models, ε ∈ {0, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1},
 | `folktables_race`|   ~630 s   | FT-3 (~3.4 s/sample)           |
 
 A **smoke** run (one small net, e.g. `--models AC-1 --num-obs 10`, ε ∈ {0.01})
-is **~2–3 s**. Per-sample cost grows steeply with ε — larger input boxes mean
-more ReLU case-splitting in exact reachability — and with width/depth, so the
-largest net at ε = 0.1 dominates each sweep; ε = 0 (a single point) is
-near-instant. `folktables` is much slower than the rest despite a 13-feature
-input: FT-3 (13 → 100 → 100 → 2) is deep *and* wide, and its two perturbable
-features (age, hours-worked) sit early in the net, so the box splits compound
-through both hidden layers — ~2.6 s/sample at ε = 0.1, with almost the whole
-~460 s sweep spent there. `folktables_race` runs the same nets but is ~1.5×
-slower still, because its one-hot race attribute yields k−1 = 3 counterfactuals
-per sample (up to 3× the reachability calls, short-circuited at the first
-violation) instead of the single flip the binary profiles do. The other four
-sweeps stay near a minute.
+is **~2–3 s**. Per-sample cost grows with ε (larger input boxes mean more ReLU
+case-splitting) and with net width/depth, so the largest net at ε = 0.1 dominates
+each sweep; ε = 0 (a single point) is near-instant. `folktables` is the slowest —
+its FT-3 net is deep *and* wide — and `folktables_race` is ~1.5× slower still,
+since its one-hot race attribute yields k−1 = 3 counterfactuals per sample
+instead of a single flip.

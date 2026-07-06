@@ -8,9 +8,10 @@ and how the model picks its class. The verification loop and the fairness
 *definitions* (the verbs) read these facts instead of hardcoding them.
 
 This module provides the DatasetAdapter container, a per-dataset loader for
-each supported dataset (load_adult, load_german, ...), and a LOADERS registry
-that the verification driver selects from via config['dataset']. Adding a
-dataset in the shared npz X/y format is a thin loader plus one registry entry.
+each supported dataset (load_adult, load_german, ...), and two registries the
+pipeline selects from via config['dataset']: LOADERS (what the dataset is) and
+RUN_PROFILES (its data file + default model list). Adding a dataset in the
+shared npz X/y format is a thin loader plus one entry in each registry.
 """
 
 from dataclasses import dataclass
@@ -188,7 +189,7 @@ def load_german(data_dir, model_path, data_file='german_data.npz'):
 
 
 # Folktables ACSIncome (US Census, CA 2018 1-Year): predicts income > $50k.
-# Built + trained in-repo (make_folktables_npz.py + train_folktables.py), not
+# Data + FT-* nets are built in a separate prep repo (dataset-prep-fairn2v), not
 # ported from NNV; the FT-* nets are trained for argmin, so class_type='min'.
 # The 13-feature representation is shared by the sex and race profiles below
 # (same noun, different fairness verb -- only the sensitive declaration differs):
