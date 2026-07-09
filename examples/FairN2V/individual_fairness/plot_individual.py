@@ -6,8 +6,8 @@ Outputs:
     (2) Combined individual fairness stacked area plot
     (3) LaTeX table for timing results (separated by fairness type)
 
-This script can be run standalone or called from run_fairn2v.py.
-Standalone: looks in the most recent results/<ts>/subdir.
+This script can be run standalone or called from run_individual_fairness.py.
+Standalone: looks in the most recent results/individual_fairness/<ts>/ subdir.
 Runner-driven: uses `config.output_dir` from caller workspace.
 """
 
@@ -42,13 +42,13 @@ def _print_table(headers, rows):
 
 def main(config=None):
     if config is None:
-        # Standalone: pick the most recent results/<ts>/ subdir if present.
-        script_dir = Path(__file__).resolve().parent
-        results_root = script_dir / 'results'
+        # Standalone: pick the most recent results/individual_fairness/<ts>/ subdir.
+        # results/ lives in the FairN2V dir, one level up from this script.
+        results_root = Path(__file__).resolve().parent.parent / 'results' / 'individual_fairness'
         subdirs = [d for d in results_root.iterdir() if d.is_dir()]
         if not subdirs:
             raise FileNotFoundError(
-                f"No results subdir found under {results_root}. Run verify.py first.")
+                f"No results subdir found under {results_root}. Run verify_individual.py first.")
         config = {
             'output_dir': max(subdirs, key=lambda d: d.stat().st_mtime),
             'save_png': True,
@@ -63,7 +63,7 @@ def main(config=None):
 
     if not counterfactual_files or not individual_files or not timing_files:
         raise FileNotFoundError(
-            f"CSV files not found in {results_dir}. Please run verify.py first.")
+            f"CSV files not found in {results_dir}. Please run verify_individual.py first.")
 
     # Most recent file of each family
     csv_counterfactual = max(counterfactual_files, key=lambda p: p.stat().st_mtime)
