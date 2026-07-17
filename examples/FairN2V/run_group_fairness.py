@@ -6,9 +6,8 @@ intervals:
   - demographic parity  (verify_parity):  the 80%-rule on the marginal favorable rate
   - equal opportunity   (verify_eqodds):  TPR gap within tolerance tau
   - equalized odds      (verify_eqodds):  TPR and FPR gaps within tolerance tau
-The n2v-native counterpart to run_individual_fairness.py; follows the n2v example
-house style (main() + argparse, as in FlowConformal / ACASXu) rather than the
-individual runner's MATLAB-port script layout.
+The group-fairness counterpart to run_individual_fairness.py; follows the n2v
+example house style (main() + argparse, as in FlowConformal / ACASXu).
 
 USAGE (run from the FairN2V dir):
   python run_group_fairness.py                          # Adult (default)
@@ -19,9 +18,9 @@ USAGE (run from the FairN2V dir):
   python run_group_fairness.py --dataset folktables_race
 
 OUTPUTS (under FairN2V/results/group_fairness/<timestamp>/):
-  - parity_<dataset>.csv         demographic-parity verdict, flow rates + CP intervals
+  - parity_<dataset>.csv         demographic-parity verdict, flow rates + CP intervals, runtime
   - parity_<dataset>.png / .pdf  per-group favorable-rate bar chart
-  - eqodds_<dataset>.csv         equal-opportunity + equalized-odds verdicts, per-group TPR/FPR + CP intervals
+  - eqodds_<dataset>.csv         equal-opportunity + equalized-odds verdicts, per-group TPR/FPR + CP intervals, runtime
   - eqodds_<dataset>.png / .pdf  per-group TPR/FPR bar chart
 
 REQUIREMENTS:

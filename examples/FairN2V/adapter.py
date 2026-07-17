@@ -98,7 +98,7 @@ class DatasetAdapter:
 
 
 def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
-    """Shared loader for npz datasets in the FairNNV `X`/`y` format.
+    """Shared loader for datasets in the common npz `X`/`y` format.
 
     Loads + min-max normalizes the data and wraps the ONNX model, then stamps
     the per-dataset fairness `declaration` onto a DatasetAdapter. All datasets
@@ -203,8 +203,8 @@ def load_german(data_dir, model_path, data_file='german_data.npz'):
 
 
 # Folktables ACSIncome (US Census, CA 2018 1-Year): predicts income > $50k.
-# Data + FT-* nets are built in a separate prep repo (dataset-prep-fairn2v), not
-# ported from NNV; the FT-* nets are trained for argmin, so class_type='min'.
+# Data + FT-* nets are built in a separate prep repo (dataset-prep-fairn2v);
+# the FT-* nets are trained for argmin, so class_type='min'.
 # The 13-feature representation is shared by the sex and race profiles below
 # (same noun, different fairness verb -- only the sensitive declaration differs):
 #     [AGEP, COW, SCHL, MAR, OCCP, POBP, RELP, WKHP, SEX, RACE_*x4]

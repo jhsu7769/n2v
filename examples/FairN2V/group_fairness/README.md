@@ -1,13 +1,13 @@
 # Group Fairness — Demographic Parity, Equal Opportunity, Equalized Odds (flow population)
 
-Probabilistic, **population-level** group-fairness verification, built on n2v's
-own normalizing-flow module (`n2v.probabilistic.flow`). Where the
+Probabilistic, **population-level** group-fairness verification, built on the
+`n2v.probabilistic.flow` normalizing-flow module. Where the
 [individual-fairness](../individual_fairness/) pipeline proves a *per-sample*
 property with exact Star reachability, this one certifies *distributional*
 properties by sampling a learned population model of each group and bounding its
 rates with Clopper–Pearson intervals. It checks **three** group-fairness notions,
 following the **VeriFair** framing (Bastani, Zhang & Solar-Lezama, OOPSLA 2019)
-with n2v-native machinery. For the shared dataset / model / adapter
+with a learned-flow population model. For the shared dataset / model / adapter
 infrastructure, see the [top-level README](../README.md).
 
 ## What it verifies
@@ -148,6 +148,9 @@ A timestamped subfolder `results/group_fairness/<yymmdd-HHMMSS>/` per run:
   each computed on the flow **and** on the real cells, with per-group rates + CP
   intervals for both. The figure has two panels (TPR | FPR); the shaded band is
   `[min_rate, min_rate + τ]` — a bar poking above it is a gap > τ.
+
+Both CSVs also record each model's wall-clock verification time (`Runtime`
+column); the verifiers print the median per run.
 
 Each report's `summary()` prints the **flow** verdict (over the fitted
 population) next to the **real-data** verdict (exact binomial on the actual
