@@ -103,8 +103,8 @@ def robustness_set(target, output_size, class_type):
 def model_accuracy(adapter):
     """Fraction of the full dataset the (softmax-stripped) net classifies correctly.
 
-    A sanity check that the port matches: prediction is argmin for class_type
-    'min', argmax otherwise.
+    A sanity check that the model loaded correctly: prediction is argmin for
+    class_type 'min', argmax otherwise.
     """
     net, X, y = adapter.net, adapter.X, adapter.y
     total_corr = 0

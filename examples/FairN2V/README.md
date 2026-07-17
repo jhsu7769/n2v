@@ -19,8 +19,8 @@ differ.
 
 The individual/counterfactual pipeline is a Python port of the MATLAB **FairNNV**
 example that ships with NNV; the group-fairness pipeline follows the **VeriFair**
-framing but certifies it with n2v's own normalizing-flow module (a per-group flow
-as the population model, Clopper–Pearson as the bound), for three notions —
+framing, certified with normalizing flows (a per-group flow as the population
+model, Clopper–Pearson as the bound), for three notions —
 demographic parity, **equal opportunity**, and **equalized odds** (the latter two
 condition on the true label, so a model can fail one notion and pass another).
 See [References](#references).
@@ -35,8 +35,8 @@ Both pipelines read these facts instead of hardcoding them. Two registries selec
 a dataset at run time via `--dataset`: `LOADERS` (what a dataset *is*) and
 `RUN_PROFILES` (the data file + the models to verify).
 
-**`folktables`** has no NNV counterpart — its data and FT-* nets are built from
-scratch to show the adapter extends cleanly to a new dataset. Built from the
+**`folktables`**'s data and FT-* nets are built from scratch to show the
+adapter extends cleanly to a new dataset. Built from the
 ACSIncome task (predict income > $50k), with the ordinal race code `RAC1P`
 one-hot encoded into a 4-way block (13 features total), it serves two profiles
 from one dataset and one set of FT-* nets: `folktables` verifies **sex** (binary)
@@ -60,9 +60,9 @@ Fifteen ONNX classifiers in `models/`, grouped by the dataset profile whose
 | BM-5         | `bank`           | 16 → 22 → 10 → 2    | |
 | BM-6         | `bank`           | 16 → 9 → 9 → 2      | |
 | BM-7         | `bank`           | 16 → 64 → 64 → 2    | |
-| FT-1         | `folktables(_race)` | 13 → 16 → 8 → 2  | Trained in-repo (not from NNV); ~80% acc |
-| FT-2         | `folktables(_race)` | 13 → 50 → 2      | Trained in-repo (not from NNV); ~80% acc |
-| FT-3         | `folktables(_race)` | 13 → 100 → 100 → 2 | Trained in-repo (not from NNV); ~81% acc |
+| FT-1         | `folktables(_race)` | 13 → 16 → 8 → 2  | Trained in the prep repo; ~80% acc |
+| FT-2         | `folktables(_race)` | 13 → 50 → 2      | Trained in the prep repo; ~80% acc |
+| FT-3         | `folktables(_race)` | 13 → 100 → 100 → 2 | Trained in the prep repo; ~81% acc |
 
 The FT-* nets are shared by both folktables profiles — `folktables` (sex) and
 `folktables_race` (race) verify the *same* data and the *same* nets; only the
@@ -84,8 +84,8 @@ labels (column 0 is the class used by the pipelines):
 | `german_data.npz` | `…/examples/Submission/ICAIF24/data/german_data.mat`| `(150, 20)`  | `(150, 2)`  |
 | `bank_data.npz`   | `…/examples/Submission/ICAIF24/data/bank_data.mat`  | `(6098, 16)` | `(6098, 2)` |
 
-`folktables_data.npz` `(20000, 13)` / `(20000, 2)` is the exception: it has no
-upstream `.mat`. It is built from the folktables ACSIncome task (California, 2018
+`folktables_data.npz` `(20000, 13)` / `(20000, 2)` is the exception: it is not
+a `.mat` conversion. It is built from the folktables ACSIncome task (California, 2018
 1-Year), one-hot encoding the ordinal `RAC1P` race code into a 4-way block (hence
 13 columns, not the task's raw 10) and subsampling to 20 000 rows with a fixed
 seed. Same `X`/`y` layout as the others (column 0 of `y` is 1 for income > $50k);
@@ -139,8 +139,8 @@ wrapper plus one `LOADERS` and one `RUN_PROFILES` entry in
 `_load_npz_adapter` does the loading, min-max normalization, and softmax-stripped
 model wrapping. Both pipelines then pick it up for free.
 
-`folktables` is the worked example of adding one *from scratch* (no upstream
-`.mat` or ONNX). The scripts that build `folktables_data.npz` and train/export
+`folktables` is the worked example of adding one *from scratch* (no
+pre-existing data or ONNX). The scripts that build `folktables_data.npz` and train/export
 the FT-* nets — and the conventions they must satisfy to line up with the adapter
 (argmin nets so the loader can use `class_type='min'`; the same min-max stats the
 adapter recomputes from the npz, so inputs line up) — live in a separate repo to
