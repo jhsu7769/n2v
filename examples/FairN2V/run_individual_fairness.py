@@ -1,17 +1,17 @@
 """
-FairN2V - Main Runner Script
-Runs the complete FairN2V verification pipeline (counterfactual + individual
+FairN2V - Individual / Counterfactual Fairness Runner
+Runs the exact-reachability verification pipeline (counterfactual + individual
 fairness) on a dataset selected via --dataset (default: adult).
 
 USAGE (run from the FairN2V dir):
-  python run_fairn2v.py                          # Adult (default)
-  python run_fairn2v.py --dataset adult_debiased
-  python run_fairn2v.py --dataset german
-  python run_fairn2v.py --dataset bank
-  python run_fairn2v.py --dataset folktables
-  python run_fairn2v.py --dataset folktables_race
+  python run_individual_fairness.py                          # Adult (default)
+  python run_individual_fairness.py --dataset adult_debiased
+  python run_individual_fairness.py --dataset german
+  python run_individual_fairness.py --dataset bank
+  python run_individual_fairness.py --dataset folktables
+  python run_individual_fairness.py --dataset folktables_race
 
-OUTPUTS (under FairN2V/results/<timestamp>/):
+OUTPUTS (under FairN2V/results/individual_fairness/<timestamp>/):
   - CSV files with verification results
   - PNG/PDF figures
   - LaTeX tables (counterfactual, timing)
@@ -24,15 +24,21 @@ REQUIREMENTS:
 
 import argparse
 import datetime
+import sys
 import warnings
 from pathlib import Path
 
-import verify
-import plot_results
+# This runner sits at the FairN2V top; the individual-fairness library modules
+# live in individual_fairness/. Put both that dir and the FairN2V dir on the path.
+_FAIRN2V_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_FAIRN2V_DIR / 'individual_fairness'))  # verify_individual, plot_individual
+sys.path.insert(0, str(_FAIRN2V_DIR))                          # find adapter
+
+import n2v
+import verify_individual
+import plot_individual
 
 from adapter import RUN_PROFILES
-
-_FAIRN2V_DIR = Path(__file__).resolve().parent
 
 ## ================== CONFIGURATION ==================
 # Run knobs; the CLI exposes the common ones (--dataset, --num-obs, --models).
@@ -69,7 +75,7 @@ def build_config(args):
     return {
         'models_dir': _FAIRN2V_DIR / 'models',
         'data_dir': _FAIRN2V_DIR / 'data',
-        'output_dir': _FAIRN2V_DIR / 'results' / ts,
+        'output_dir': _FAIRN2V_DIR / 'results' / 'individual_fairness' / ts,
         'dataset': args.dataset,
         'data_file': profile['data_file'],
         'model_list': args.models or profile['model_list'],
@@ -117,10 +123,10 @@ def main(argv=None):
     print("\nConfiguration validated successfully.\n")
 
     print("======= STEP 1: Running Verification ==========\n")
-    verify.main(config)
+    verify_individual.main(config)
 
     print("\n======= STEP 2: Generating Figures ==========\n")
-    plot_results.main(config)
+    plot_individual.main(config)
 
     print("\n======= FairN2V Pipeline Complete ==========")
     print(f"All results saved to: {config['output_dir']}")

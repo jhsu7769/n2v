@@ -16,6 +16,7 @@ shared npz X/y format is a thin loader plus one entry in each registry.
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -43,6 +44,14 @@ class DatasetAdapter:
     sensitive_encoding: str         # 'binary' | 'onehot'
     output_size: int                # number of output classes
     class_type: str                 # 'min' or 'max' -- how this net picks the class
+    positive_class: int             # output index counted as the favorable outcome
+
+    # Human-readable names for the sensitive groups, in group-index order
+    # (binary: [value-0 name, value-1 name]; onehot: per sensitive column). Used
+    # for plot legends; None falls back to "group 0", "group 1", ... Only set
+    # where the raw encoding is known -- left None for datasets whose codebook
+    # isn't documented, to avoid mislabeling.
+    group_names: Optional[list] = None
 
     def counterfactuals(self, x):
         """Return the counterfactual versions of x w.r.t. the sensitive attribute.
@@ -89,7 +98,7 @@ class DatasetAdapter:
 
 
 def _load_npz_adapter(name, data_dir, model_path, data_file, **declaration):
-    """Shared loader for npz datasets in the FairNNV `X`/`y` format.
+    """Shared loader for datasets in the common npz `X`/`y` format.
 
     Loads + min-max normalizes the data and wraps the ONNX model, then stamps
     the per-dataset fairness `declaration` onto a DatasetAdapter. All datasets
@@ -153,6 +162,8 @@ def load_adult(data_dir, model_path, data_file='adult_data.npz'):
         sensitive_encoding='binary',
         output_size=2,
         class_type='min',
+        positive_class=0,  # index 0 = income > $50k (~24% base rate)
+        group_names=['Female', 'Male'],  # group 0 is the ~33% minority = female
     )
 
 
@@ -169,6 +180,8 @@ def load_adult_debiased(data_dir, model_path, data_file='adult_data.npz'):
         sensitive_encoding='binary',
         output_size=2,
         class_type='min',
+        positive_class=0,  # index 0 = income > $50k (~24% base rate)
+        group_names=['Female', 'Male'],  # group 0 is the ~33% minority = female
     )
 
 
@@ -185,12 +198,13 @@ def load_german(data_dir, model_path, data_file='german_data.npz'):
         sensitive_encoding='binary',
         output_size=2,
         class_type='min',
+        positive_class=0,  # index 0 = good credit (~70% base rate)
     )
 
 
 # Folktables ACSIncome (US Census, CA 2018 1-Year): predicts income > $50k.
-# Data + FT-* nets are built in a separate prep repo (dataset-prep-fairn2v), not
-# ported from NNV; the FT-* nets are trained for argmin, so class_type='min'.
+# Data + FT-* nets are built in a separate prep repo (dataset-prep-fairn2v);
+# the FT-* nets are trained for argmin, so class_type='min'.
 # The 13-feature representation is shared by the sex and race profiles below
 # (same noun, different fairness verb -- only the sensitive declaration differs):
 #     [AGEP, COW, SCHL, MAR, OCCP, POBP, RELP, WKHP, SEX, RACE_*x4]
@@ -209,6 +223,8 @@ def load_folktables(data_dir, model_path, data_file='folktables_data.npz'):
         sensitive_encoding='binary',
         output_size=2,
         class_type='min',
+        positive_class=1,  # index 1 = income > $50k (~41% base rate)
+        group_names=['Male', 'Female'],  # ACS SEX: 1=Male->0, 2=Female->1
     )
 
 
@@ -224,6 +240,8 @@ def load_folktables_race(data_dir, model_path, data_file='folktables_data.npz'):
         sensitive_encoding='onehot',
         output_size=2,
         class_type='min',
+        positive_class=1,  # index 1 = income > $50k (~41% base rate)
+        group_names=['White', 'Black', 'Asian', 'Other'],  # one-hot cols 9..12
     )
 
 
@@ -240,6 +258,7 @@ def load_bank(data_dir, model_path, data_file='bank_data.npz'):
         sensitive_encoding='binary',
         output_size=2,
         class_type='min',
+        positive_class=0,  # index 0 = subscribed (~13% base rate)
     )
 
 

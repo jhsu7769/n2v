@@ -6,11 +6,13 @@ Generates results for: (1) Counterfactual fairness table
                        (2) Individual fairness area plot
                        (3) Comprehensive timing table
 
-This script can be run standalone or called from run_fairn2v.py.
-Standalone: uses default paths (./models, ./data, ./results/<ts>).
-Runner-driven: paths come from the `config` dict passed by the runner.
+This script can be run standalone or called from run_individual_fairness.py
+Standalone: default paths under the FairN2V dir (../models, ../data,
+../results/individual_fairness/<ts>)
+Runner-driven: paths come from the `config` dict passed by the runner
 """
 
+import sys
 import time
 import datetime
 from pathlib import Path
@@ -21,9 +23,11 @@ import torch
 from n2v.sets import Star, HalfSpace
 from n2v.utils.verify_specification import verify_specification
 
-from adapter import LOADERS
+# data/, models/, results/ and adapter.py live in the FairN2V dir, one level up.
+_FAIRN2V_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_FAIRN2V_DIR))
 
-_FAIRN2V_DIR = Path(__file__).resolve().parent
+from adapter import LOADERS
 
 # Per-sample verdict codes stored in the result matrix.
 _FAIR, _UNFAIR, _UNKNOWN = 1, 0, 2
@@ -99,8 +103,8 @@ def robustness_set(target, output_size, class_type):
 def model_accuracy(adapter):
     """Fraction of the full dataset the (softmax-stripped) net classifies correctly.
 
-    A sanity check that the port matches: prediction is argmin for class_type
-    'min', argmax otherwise.
+    A sanity check that the model loaded correctly: prediction is argmin for
+    class_type 'min', argmax otherwise.
     """
     net, X, y = adapter.net, adapter.X, adapter.y
     total_corr = 0
@@ -197,7 +201,7 @@ def _default_config():
     return {
         'models_dir': _FAIRN2V_DIR / 'models',
         'data_dir': _FAIRN2V_DIR / 'data',
-        'output_dir': _FAIRN2V_DIR / 'results' / ts,
+        'output_dir': _FAIRN2V_DIR / 'results' / 'individual_fairness' / ts,
         'dataset': 'adult',
         'data_file': 'adult_data.npz',
         'model_list': ['AC-1', 'AC-3'],
